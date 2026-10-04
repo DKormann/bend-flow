@@ -1,0 +1,25 @@
+{
+  "name": "bend-lsp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "bend-lsp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

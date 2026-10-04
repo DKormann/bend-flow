@@ -1,0 +1,107 @@
+
+
+# concept for a syntax
+# flow only in one direction
+# recursive functions may call themselves, but cannot call later definitions
+# no calling later defined stuff
+# top level behaves like any other level, main is just a function
+# '|' is used to create tagged unions. they can also be created on any level
+# type parameters are explicit, as in Bend: List<Nat>
+# constructors use explicit type parameters and braces: Cons<Nat>{...}
+# constructor fields in type definitions also use braces; field names are optional
+
+import ./lib.bend as Lib
+
+import Base
+
+import bend-kit-json@0.4.0.0/json.bend as Json
+
+FR: Type =
+  | fn {Nat -> Nat, Nat}
+  | o {Nat}
+
+FIN: Type = (x: Nat, h: Nat)
+
+
+SIG: Type = (x: Nat, F(x))
+
+example_list: List<Nat> = Con<Nat>{2n, Nil{} }
+
+sum(ls: List<Nat>): Nat =
+  match ls:
+    | Nil{} => 0n
+    | Con{x, xs} => Nat.add(x, sum(xs))
+
+MyProp<n: Nat>: Type =
+  | eq{k: Nat, k == n}
+  | is3{k: Nat, k == 3n}
+
+MyP5: Type = MyProp<5n>
+
+MyPalso5: Type = MyProp<5n>
+
+
+
+fn(T: Type, x: T):T = x
+
+
+main () : Nat  = 
+  res: Nat = fn (Nat, 3n)
+  res
+
+
+
+
+
+POO(mp: MyProp<5n>): String =
+  match mp:
+    | eq{_, _} => "nice"
+    | is3{_, _} => "boring"
+
+PEEP(k: Nat, f: FR): Nat =
+  match f:
+    | fn{p, k} => p(k)
+    | o{n} => n
+
+def bendfunc(x:Nat) -> Nat:
+
+  e = {3n: Nat}
+  e
+
+flowfunc(x:Nat) : Nat =
+  bendfunc(x)
+
+
+EQ(a: Nat, b: Nat): Type =
+  { a == b : Nat}
+
+sample: Nat =
+  +e: Nat = bendfunc(5n)
+  f: Nat = Lib.moo
+
+
+  p : EQ(1n, 1n) = {==}
+
+  g: Type = Json.Val
+
+  mm : Nat =
+    match e: 
+      | Zero{} => 0n
+      | _ => 1n
+
+  mybool: Type = | YES{} | NO{}
+  myopinion : mybool = YES
+  handleopinion(op: mybool): String =
+    match op:
+      | YES => "nice"
+      | NO => "okay"
+  e
+
+
+dub(x: Nat, y: Nat) : FIN =
+  FIN.mk{x, y}
+
+cop(+x: Nat) : FIN = FIN.mk{x, x}
+
+
+

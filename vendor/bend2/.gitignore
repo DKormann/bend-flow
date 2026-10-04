@@ -1,0 +1,5 @@
+.tmp/
+.claude/
+.agents/
+node_modules/
+*.tgz

@@ -1,0 +1,152 @@
+<html>
+<body>
+
+  <script>
+    const body = document.querySelector('body');
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+
+    function mksvg(...paths){
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('viewBox', '0 0 512 512');
+      svg.setAttribute('width', '512');
+      svg.setAttribute('height', '512');
+      svg.setAttribute('role', 'img');
+
+
+      for(const path of paths){
+        const pathElement = document.createElementNS(svgNS, 'path');
+        pathElement.setAttribute('d',
+          "m" + path.offset + 
+          path.points.replace(/\n\s*/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .split(' ')
+          .map(x=> {
+            let nm = parseFloat(x)
+            if (!isNaN(nm)) return nm * path.scale;
+            return x;
+          })
+          .join(' ')
+          + "z"
+        );
+        pathElement.setAttribute('fill', path.fill);
+        svg.appendChild(pathElement);
+      }
+      return svg;
+    }
+
+
+
+    function mksvgDraw(...strokes){
+
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('viewBox', '0 0 512 512');
+      svg.setAttribute('width', '512');
+      svg.setAttribute('height', '512');
+      svg.setAttribute('role', 'img');
+      // svg.style.border = '1px solid gray';
+
+      for(const path of strokes){
+        const pathElement = document.createElementNS(svgNS, 'path');
+        pathElement.setAttribute('d',
+          "m" + path.offset + 
+          path.points.replace(/\n\s*/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .split(' ')
+          .map(x=> {
+            let nm = parseFloat(x)
+            if (!isNaN(nm)) return nm * path.scale;
+            return x;
+          })
+          .join(' ')
+          + "z"
+        );
+        pathElement.setAttribute('stroke', path.stroke);
+        pathElement.setAttribute('fill', 'none');
+        pathElement.setAttribute('stroke-width', '55');
+        svg.appendChild(pathElement);
+      }
+      svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      return svg;
+    }
+
+
+
+
+    let cursor = {
+      points:`
+        l 5 0
+        l 0 80
+        l -5 0
+      `,
+      offset: '400 90',
+      scale: 4
+    }
+
+    let B_icon = mksvgDraw({
+      points: `
+        l 20 0
+        c 30 0
+          30 40
+          0 40
+        l -20 0
+        l 20 0
+        c 35 0
+          35 40
+          0 40
+        l -20 0
+      `,
+      offset: '90 90',
+      scale: 4,
+      stroke: '#707070'
+    }, {
+      ...cursor,
+      stroke: '#403090'
+    })
+
+
+    let F_icon = mksvgDraw({
+      points: `
+        l 50 0
+        l -50 0
+        l 0 40
+        l 40 0
+        l -40 0
+        l 0 45
+        z
+      `,
+      offset: '90 90',
+      scale: 4,
+      stroke: '#707070'
+    }, {
+      ...cursor,
+      stroke: '#3020b0'
+    })
+
+
+    
+    body.appendChild(B_icon);
+    body.appendChild(F_icon);
+
+
+    console.log(B_icon.outerHTML)
+    console.log(F_icon.outerHTML)
+
+
+
+  </script>
+  <style>
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background-color: black;
+      /* background-color: white; */
+    }
+  </style>
+</body>
+</html>

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Bend",
+  "scopeName": "source.bend",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#holes" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [{ "name": "comment.line.number-sign.bend", "match": "#.*$" }]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.bend",
+          "begin": "\"",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.bend" } },
+          "end": "\"",
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.bend" } },
+          "patterns": [{ "name": "constant.character.escape.bend", "match": "\\\\." }]
+        },
+        {
+          "name": "string.quoted.single.bend",
+          "begin": "'",
+          "end": "'",
+          "patterns": [{ "name": "constant.character.escape.bend", "match": "\\\\." }]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(def|law)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.bend" },
+            "2": { "name": "entity.name.function.bend" }
+          }
+        },
+        {
+          "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.bend" },
+            "2": { "name": "entity.name.type.bend" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.bend", "match": "\\b(?:match|case|do|return|for|exs|where)\\b" },
+        { "name": "keyword.declaration.bend", "match": "\\b(?:def|law|type|is|import|as)\\b" },
+        { "name": "storage.modifier.bend", "match": "@unsafe\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "storage.type.bend", "match": "\\b(?:Type|Data|Kind|Quant)\\b" },
+        { "name": "support.type.bend", "match": "\\b[A-Z][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\b" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.float.bend", "match": "\\b[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?\\b" },
+        { "name": "constant.numeric.nat.bend", "match": "\\b[0-9]+n\\b" },
+        { "name": "constant.numeric.u32.bend", "match": "\\b[0-9]+\\b" },
+        { "name": "constant.numeric.quantity.bend", "match": "&[012]\\b" }
+      ]
+    },
+    "holes": {
+      "patterns": [{ "name": "variable.other.hole.bend", "match": "\\?[A-Za-z_][A-Za-z0-9_]*" }]
+    },
+    "operators": {
+      "patterns": [{ "name": "keyword.operator.bend", "match": "==|!=|<=|>=|->|=>|<-|<&>|\\+\\+|<>|[-+*/%<>=&|!@~\\\\]" }]
+    }
+  }
+}

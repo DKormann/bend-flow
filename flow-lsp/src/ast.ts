@@ -1,0 +1,108 @@
+export type Span = { start: number; end: number };
+
+export type Identifier = { kind: "Identifier"; name: string; span: Span };
+
+export type Quantity = "none" | "lone" | "many" | "comptime";
+
+export type Field = {
+  kind: "Field";
+  name?: Identifier;
+  quantity: Quantity;
+  quantitySpan?: Span;
+  type: Expression;
+  span: Span;
+};
+
+export type Variant = {
+  kind: "Variant";
+  name: Identifier;
+  fields: Field[];
+  span: Span;
+};
+
+export type NameExpression = Identifier;
+export type NumberExpression = { kind: "NumberExpression"; value: string; span: Span };
+export type StringExpression = { kind: "StringExpression"; value: string; raw: string; span: Span };
+export type ArrowExpression = { kind: "ArrowExpression"; domain: Expression; codomain: Expression; span: Span };
+export type EqualityExpression = { kind: "EqualityExpression"; left: Expression; right: Expression; span: Span };
+export type TypedEqualityExpression = { kind: "TypedEqualityExpression"; left: Expression; right: Expression; type: Expression; span: Span };
+export type ReflexivityExpression = { kind: "ReflexivityExpression"; span: Span };
+export type AnnotationExpression = { kind: "AnnotationExpression"; value: Expression; type: Expression; span: Span };
+export type CallExpression = { kind: "CallExpression"; callee: Expression; arguments: Expression[]; span: Span };
+export type TypeApplicationExpression = { kind: "TypeApplicationExpression"; callee: Expression; arguments: Expression[]; span: Span };
+export type ConstructorExpression = { kind: "ConstructorExpression"; callee: Expression; arguments: Expression[]; span: Span };
+export type TupleExpression = { kind: "TupleExpression"; fields: Field[]; span: Span };
+export type UnionExpression = { kind: "UnionExpression"; variants: Variant[]; span: Span };
+export type MatchExpression = { kind: "MatchExpression"; scrutinee: Expression; cases: MatchCase[]; span: Span };
+export type DoStatement = { kind: "DoStatement"; source: string; span: Span };
+export type DoExpression = { kind: "DoExpression"; effect: Expression; statements: DoStatement[]; span: Span };
+
+export type Expression =
+  | NameExpression
+  | NumberExpression
+  | StringExpression
+  | ArrowExpression
+  | EqualityExpression
+  | TypedEqualityExpression
+  | ReflexivityExpression
+  | AnnotationExpression
+  | CallExpression
+  | TypeApplicationExpression
+  | ConstructorExpression
+  | TupleExpression
+  | UnionExpression
+  | MatchExpression
+  | DoExpression;
+
+export type NamePattern = { kind: "NamePattern"; name: string; span: Span };
+export type ConstructorPattern = {
+  kind: "ConstructorPattern";
+  constructor: string;
+  typeArguments: Expression[];
+  fields: Pattern[];
+  span: Span;
+};
+export type Pattern = NamePattern | ConstructorPattern;
+
+export type MatchCase = {
+  kind: "MatchCase";
+  pattern: Pattern;
+  body: Expression | Block;
+  span: Span;
+};
+
+export type Declaration = {
+  kind: "Declaration";
+  name: Identifier;
+  quantity: Quantity;
+  quantitySpan?: Span;
+  typeParameters: Field[];
+  parameters: Field[];
+  returnType: Expression;
+  body: Expression | Block;
+  span: Span;
+};
+
+export type ImportStatement = {
+  kind: "ImportStatement";
+  path: string;
+  alias?: Identifier;
+  pathSpan: Span;
+  span: Span;
+};
+
+export type RawBendDefinition = {
+  kind: "RawBendDefinition";
+  source: string;
+  span: Span;
+};
+
+export type ExpressionStatement = {
+  kind: "ExpressionStatement";
+  expression: Expression;
+  span: Span;
+};
+
+export type Statement = ImportStatement | Declaration | RawBendDefinition | ExpressionStatement;
+export type Block = { kind: "Block"; statements: Statement[]; span: Span };
+export type Program = { kind: "Program"; statements: Statement[]; span: Span };

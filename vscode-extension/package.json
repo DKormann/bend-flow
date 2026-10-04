@@ -1,0 +1,76 @@
+{
+  "name": "bend-flow-vscode",
+  "displayName": "Bend & Flow Language Tools",
+  "description": "Bend language coloring and navigation powered by the Bend parser",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "dkormann",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:bend", "onLanguage:flow"],
+  "main": "./dist/extension.cjs",
+  "files": [
+    "dist/**",
+    "server/**",
+    "syntaxes/**",
+    "icons/**",
+    "language-configuration.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "bend",
+        "aliases": ["Bend", "bend"],
+        "extensions": [".bend"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/bend.svg",
+          "dark": "./icons/bend.svg"
+        }
+      },
+      {
+        "id": "flow",
+        "aliases": ["Flow", "flow"],
+        "extensions": [".flow"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/flow.svg",
+          "dark": "./icons/flow.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "bend",
+        "scopeName": "source.bend",
+        "path": "./syntaxes/bend.tmLanguage.json"
+      },
+      {
+        "language": "flow",
+        "scopeName": "source.flow",
+        "path": "./syntaxes/flow.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      { "language": "bend", "scopes": { "type": ["entity.name.type.bend"], "function": ["entity.name.function.bend"] } },
+      { "language": "flow", "scopes": { "type": ["entity.name.type.flow"], "function": ["entity.name.function.flow"] } }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vscode-languageclient": "^9.0.1"
+  }
+}

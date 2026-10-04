@@ -1,0 +1,14 @@
+{
+  "name": "bend-flow-language-tools",
+  "private": true,
+  "workspaces": [
+    "bend-lsp",
+    "flow-lsp",
+    "vscode-extension"
+  ],
+  "scripts": {
+    "build": "npm run build -w bend-lsp && npm run build -w flow-lsp && npm run build -w bend-flow-vscode",
+    "test": "npm run test -w bend-lsp && npm run test -w flow-lsp",
+    "package:vscode": "npm run build && npm run package -w bend-flow-vscode"
+  }
+}
