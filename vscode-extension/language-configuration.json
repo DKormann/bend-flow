@@ -10,7 +10,7 @@
   ],
   "surroundingPairs": [["{", "}"], ["[", "]"], ["(", ")"], ["\"", "\""], ["'", "'"]],
   "indentationRules": {
-    "increaseIndentPattern": ":\\s*(?:#.*)?$",
+    "increaseIndentPattern": "(?:[:]|=>|[^=]=)\\s*(?:#.*)?$",
     "decreaseIndentPattern": "^\\s*(?:case\\b|[})\\]])"
   }
 }

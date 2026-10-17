@@ -10,4 +10,5 @@ declare module "bend-infrastructure" {
   export function err_show(error: Err): string;
   export function term_lower(term: HTerm, depth?: number): LTerm;
   export function term_show(term: LTerm): string;
+  export function term_snf(book: Book, term: HTerm): HTerm;
 }

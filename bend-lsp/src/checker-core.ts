@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { book_load, book_nil, book_valid, err_show, term_lower, term_show, term_snf, type Book, type Err } from "bend-infrastructure";
+import { book_load, book_nil, book_valid, err_show, parse_book, term_lower, term_show, term_snf, type Book, type Err } from "bend-infrastructure";
 import type { CheckDiagnostic, CheckRequest, CheckResult, TypedHover, ValuePreview } from "./checker-protocol.js";
 
 type StagedSource = { original: string; staged: string; uri: string; text: string };
@@ -172,49 +172,71 @@ function errorCode(error: Err, checking: boolean): CheckDiagnostic["code"] {
   return /import|file|hash|namespace|cycle|BEND_HUB/i.test(expected) ? "imports" : "parsing";
 }
 
-type SourceDefinition = { name: string; start: number };
+type SourceDefinition = { name: string; start: number; returnType?: string };
 
 function sourceDefinitions(source: string): SourceDefinition[] {
   const definitions: SourceDefinition[] = [];
-  const pattern = /^def\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\(/gm;
+  const pattern = /^def\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\([^\n]*\)\s*(?:->\s*(.+?)\s*)?:\s*(?:#.*)?$/gm;
   for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
-    definitions.push({ name: match[1], start: match.index });
+    definitions.push({ name: match[1], start: match.index, returnType: match[2] });
   }
   return definitions;
 }
 
-/** Evaluate only named, argument-free top-level defs selected by a #? comment. */
+/** Evaluate a #? expression, or the surrounding argument-free top-level def. */
 function renderValuePreviews(book: Book, source: StagedSource): ValuePreview[] {
   const result: ValuePreview[] = [];
   const definitions = sourceDefinitions(source.text);
   const markers = /#\?/g;
+  let previewId = 0;
   for (let marker = markers.exec(source.text); marker; marker = markers.exec(source.text)) {
     const lineEnd = source.text.indexOf("\n", marker.index);
     const end = lineEnd < 0 ? source.text.length : lineEnd;
-    const after = source.text.slice(marker.index + marker[0].length, end);
-    const named = /^\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$/.exec(after);
-    const containing = definitions.filter((definition) => definition.start <= marker.index).at(-1);
-    const following = definitions.find((definition) => definition.start > marker.index);
-    const name = named?.[1] ?? containing?.name ?? following?.name;
-    if (!name) continue;
+    const expression = source.text.slice(marker.index + marker[0].length, end).trim();
+    let evaluationBook = book;
+    let definition: any;
 
-    const definition = book.tlds[name];
-    if (!definition || definition.$ !== "Def" || definition.n !== 0 || definition.v === null || definition.i !== undefined) continue;
     try {
+      if (expression) {
+        // Let Bend parse, resolve, infer, and check the expression by placing it
+        // in a private zero-argument definition. A copy keeps previews out of
+        // diagnostics, navigation, and subsequent expressions.
+        evaluationBook = {
+          ...book,
+          tlds: { ...book.tlds },
+          ctrs: { ...book.ctrs },
+          order: [...book.order],
+          tmps: { ...book.tmps },
+        };
+        const name = `__bend_value_preview_${previewId++}`;
+        const callee = /^([A-Za-z_][A-Za-z0-9_.]*)\s*(?:\(|$)/.exec(expression)?.[1];
+        const returnType = definitions.find((item) => item.name === callee)?.returnType;
+        if (!returnType) continue;
+        const done = evaluationBook.order.length;
+        parse_book(evaluationBook, path.dirname(source.staged).replaceAll("\\", "/"), `def ${name}() -> ${returnType}:\n  ${expression}\n`, "", {});
+        book_valid(evaluationBook, done);
+        definition = evaluationBook.tlds[name];
+      } else {
+        const containing = definitions.filter((item) => item.start <= marker.index).at(-1);
+        const following = definitions.find((item) => item.start > marker.index);
+        definition = book.tlds[containing?.name ?? following?.name ?? ""];
+      }
+
+      if (!definition || definition.$ !== "Def" || definition.n !== 0 || definition.v === null || definition.i !== undefined) continue;
       const type = term_show(term_lower(definition.T));
-      // Effects are values too, but normalizing one does not execute it and is
-      // misleading as a computed preview. Functions and foreign defs are also excluded.
+      // Normalizing an effect only constructs it; it does not execute it, so
+      // showing that as a computed result would be misleading.
       if (/^IO(?:\b|\()/.test(type)) continue;
-      const value = term_show(term_lower(term_snf(book, definition.v)))
+      const value = term_show(term_lower(term_snf(evaluationBook, definition.v)))
         .replace(/\s+/g, " ")
         .trim();
       if (!value) continue;
       result.push({
         uri: source.uri,
-        offset: named ? end : marker.index + marker[0].length,
+        offset: expression ? end : marker.index + marker[0].length,
         value: value.length > 200 ? `${value.slice(0, 197)}...` : value,
       });
-    } catch { /* A value that cannot be interpreted simply has no preview. */ }
+    } catch { /* An expression that cannot be parsed, checked, or reduced has no preview. */ }
   }
   return result;
 }

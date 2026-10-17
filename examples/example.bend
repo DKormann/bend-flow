@@ -13,7 +13,6 @@ import ./lib.bend as Lib
 
 
 
-
 def wrong(+e: Nat) -> Nat:
   j = e
   e
@@ -22,3 +21,14 @@ def correct(+e: Nat) -> Nat:
 
   d = {lib.moo() : Nat}
   wrong(e)
+
+
+
+
+
+def answer()->Nat:
+  40n
+  #?
+
+
+

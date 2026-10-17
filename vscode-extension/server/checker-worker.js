@@ -3293,9 +3293,9 @@ function errorCode(error, checking) {
 }
 function sourceDefinitions(source) {
   const definitions = [];
-  const pattern = /^def\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\(/gm;
+  const pattern = /^def\s+([A-Za-z_][A-Za-z0-9_.]*)\s*\([^\n]*\)\s*(?:->\s*(.+?)\s*)?:\s*(?:#.*)?$/gm;
   for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
-    definitions.push({ name: match[1], start: match.index });
+    definitions.push({ name: match[1], start: match.index, returnType: match[2] });
   }
   return definitions;
 }
@@ -3303,25 +3303,45 @@ function renderValuePreviews(book, source) {
   const result = [];
   const definitions = sourceDefinitions(source.text);
   const markers = /#\?/g;
+  let previewId = 0;
   for (let marker = markers.exec(source.text); marker; marker = markers.exec(source.text)) {
     const lineEnd = source.text.indexOf("\n", marker.index);
     const end = lineEnd < 0 ? source.text.length : lineEnd;
-    const after = source.text.slice(marker.index + marker[0].length, end);
-    const named = /^\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$/.exec(after);
-    const containing = definitions.filter((definition2) => definition2.start <= marker.index).at(-1);
-    const following = definitions.find((definition2) => definition2.start > marker.index);
-    const name = named?.[1] ?? containing?.name ?? following?.name;
-    if (!name) continue;
-    const definition = book.tlds[name];
-    if (!definition || definition.$ !== "Def" || definition.n !== 0 || definition.v === null || definition.i !== void 0) continue;
+    const expression = source.text.slice(marker.index + marker[0].length, end).trim();
+    let evaluationBook = book;
+    let definition;
     try {
+      if (expression) {
+        evaluationBook = {
+          ...book,
+          tlds: { ...book.tlds },
+          ctrs: { ...book.ctrs },
+          order: [...book.order],
+          tmps: { ...book.tmps }
+        };
+        const name = `__bend_value_preview_${previewId++}`;
+        const callee = /^([A-Za-z_][A-Za-z0-9_.]*)\s*(?:\(|$)/.exec(expression)?.[1];
+        const returnType = definitions.find((item) => item.name === callee)?.returnType;
+        if (!returnType) continue;
+        const done = evaluationBook.order.length;
+        parse_book(evaluationBook, path2.dirname(source.staged).replaceAll("\\", "/"), `def ${name}() -> ${returnType}:
+  ${expression}
+`, "", {});
+        book_valid(evaluationBook, done);
+        definition = evaluationBook.tlds[name];
+      } else {
+        const containing = definitions.filter((item) => item.start <= marker.index).at(-1);
+        const following = definitions.find((item) => item.start > marker.index);
+        definition = book.tlds[containing?.name ?? following?.name ?? ""];
+      }
+      if (!definition || definition.$ !== "Def" || definition.n !== 0 || definition.v === null || definition.i !== void 0) continue;
       const type = term_show(term_lower(definition.T));
       if (/^IO(?:\b|\()/.test(type)) continue;
-      const value = term_show(term_lower(term_snf(book, definition.v))).replace(/\s+/g, " ").trim();
+      const value = term_show(term_lower(term_snf(evaluationBook, definition.v))).replace(/\s+/g, " ").trim();
       if (!value) continue;
       result.push({
         uri: source.uri,
-        offset: named ? end : marker.index + marker[0].length,
+        offset: expression ? end : marker.index + marker[0].length,
         value: value.length > 200 ? `${value.slice(0, 197)}...` : value
       });
     } catch {

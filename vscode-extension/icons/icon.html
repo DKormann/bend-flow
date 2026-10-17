@@ -65,7 +65,7 @@
         );
         pathElement.setAttribute('stroke', path.stroke);
         pathElement.setAttribute('fill', 'none');
-        pathElement.setAttribute('stroke-width', '55');
+        pathElement.setAttribute('stroke-width', '60');
         svg.appendChild(pathElement);
       }
       svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
@@ -77,12 +77,12 @@
 
     let cursor = {
       points:`
-        l 5 0
-        l 0 80
-        l -5 0
+        l 15 0
+        l 0 90
+        l -15 0
       `,
-      offset: '400 90',
-      scale: 4
+      offset: '380 120',
+      scale: 3
     }
 
     let B_icon = mksvgDraw({
@@ -98,12 +98,12 @@
           0 40
         l -20 0
       `,
-      offset: '90 90',
-      scale: 4,
+      offset: '120 135',
+      scale: 3,
       stroke: '#707070'
     }, {
       ...cursor,
-      stroke: '#403090'
+      stroke: '#8050e0'
     })
 
 
@@ -117,12 +117,12 @@
         l 0 45
         z
       `,
-      offset: '90 90',
-      scale: 4,
+      offset: '120 135',
+      scale: 3,
       stroke: '#707070'
     }, {
       ...cursor,
-      stroke: '#3020b0'
+      stroke: '#5080e0'
     })
 
 
@@ -145,7 +145,7 @@
       height: 100vh;
       margin: 0;
       background-color: black;
-      /* background-color: white; */
+      background-color: white;
     }
   </style>
 </body>

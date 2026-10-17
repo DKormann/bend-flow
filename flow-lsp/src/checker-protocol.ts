@@ -8,6 +8,7 @@ export type FlowCheckDiagnostic = {
   code: "lowering" | "bend-parsing" | "checking" | "holes";
 };
 export type FlowTypedHover = { start: number; end: number; value: string };
+export type FlowValuePreview = { uri: string; offset: number; value: string };
 export type FlowCheckResult = {
   id: number;
   uri: string;
@@ -15,4 +16,5 @@ export type FlowCheckResult = {
   diagnostics: FlowCheckDiagnostic[];
   hovers: Record<string, string>;
   typedHovers: FlowTypedHover[];
+  valuePreviews: FlowValuePreview[];
 };

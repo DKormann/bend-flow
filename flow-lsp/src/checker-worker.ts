@@ -12,6 +12,7 @@ parentPort?.on("message", (request: FlowCheckRequest) => {
       diagnostics: [{ uri: request.uri, start: 0, end: 1, message: error instanceof Error ? error.message : String(error), code: "lowering" }],
       hovers: {},
       typedHovers: [],
+      valuePreviews: [],
     });
   });
 });

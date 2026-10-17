@@ -11,6 +11,7 @@ import {
   TextDocumentSyncKind,
   type Definition,
   type Hover,
+  type InlayHint,
   type InitializeResult,
   type SemanticTokens,
 } from "vscode-languageserver/node.js";
@@ -36,6 +37,7 @@ connection.onInitialize((): InitializeResult => ({
     textDocumentSync: TextDocumentSyncKind.Full,
     definitionProvider: true,
     hoverProvider: true,
+    inlayHintProvider: true,
     semanticTokensProvider: {
       legend: { tokenTypes: [...FLOW_TOKEN_TYPES], tokenModifiers: [...FLOW_TOKEN_MODIFIERS] },
       full: true,
@@ -66,6 +68,23 @@ connection.onHover((params): Hover | null => {
   const hovers = result?.hovers;
   const value = hovers?.[token] ?? hovers?.[token.split(".").at(-1) ?? token];
   return value ? { contents: { kind: MarkupKind.Markdown, value } } : null;
+});
+
+connection.languages.inlayHint.on((params): InlayHint[] => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document || document.languageId !== "flow") return [];
+  const result = checkResults.get(document.uri);
+  if (!result) return [];
+  const rangeStart = document.offsetAt(params.range.start);
+  const rangeEnd = document.offsetAt(params.range.end);
+  return result.valuePreviews
+    .filter((preview) => preview.uri === document.uri && preview.offset >= rangeStart && preview.offset <= rangeEnd)
+    .map((preview) => ({
+      position: document.positionAt(preview.offset),
+      label: ` ${preview.value}`,
+      tooltip: "Computed by the Bend interpreter",
+      paddingLeft: true,
+    }));
 });
 
 connection.onDefinition((params): Definition | null => {
@@ -137,6 +156,7 @@ function scheduleCheck(document: TextDocument): void {
       const current = documents.get(result.uri);
       if (!current || current.version !== result.version) return;
       checkResults.set(result.uri, result);
+      void connection.languages.inlayHint.refresh().catch(() => { /* Client does not support refresh. */ });
       const grouped = new Map<string, typeof result.diagnostics>();
       for (const item of result.diagnostics) grouped.set(item.uri, [...(grouped.get(item.uri) ?? []), item]);
       const previousTargets = diagnosticTargets.get(result.uri) ?? new Set<string>();

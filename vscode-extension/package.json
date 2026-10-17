@@ -1,16 +1,26 @@
 {
-  "name": "bend-flow-vscode",
-  "displayName": "Bend & Flow Language Tools",
+  "name": "bend-2",
+  "displayName": "Bend 2 + BendHub",
   "description": "Bend language coloring and navigation powered by the Bend parser",
-  "version": "0.1.0",
+  "icon": "icons/bend.png",
+  "version": "0.1.22",
   "private": true,
   "publisher": "dkormann",
   "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Programming Languages"],
-  "activationEvents": ["onLanguage:bend", "onLanguage:flow"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dkormann/bend-flow.git"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:bend",
+    "onLanguage:flow"
+  ],
   "main": "./dist/extension.cjs",
   "files": [
     "dist/**",
@@ -25,8 +35,13 @@
     "languages": [
       {
         "id": "bend",
-        "aliases": ["Bend", "bend"],
-        "extensions": [".bend"],
+        "aliases": [
+          "Bend",
+          "bend"
+        ],
+        "extensions": [
+          ".bend"
+        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./icons/bend.svg",
@@ -35,8 +50,13 @@
       },
       {
         "id": "flow",
-        "aliases": ["Flow", "flow"],
-        "extensions": [".flow"],
+        "aliases": [
+          "Flow",
+          "flow"
+        ],
+        "extensions": [
+          ".flow"
+        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./icons/flow.svg",
@@ -57,8 +77,28 @@
       }
     ],
     "semanticTokenScopes": [
-      { "language": "bend", "scopes": { "type": ["entity.name.type.bend"], "function": ["entity.name.function.bend"] } },
-      { "language": "flow", "scopes": { "type": ["entity.name.type.flow"], "function": ["entity.name.function.flow"] } }
+      {
+        "language": "bend",
+        "scopes": {
+          "type": [
+            "entity.name.type.bend"
+          ],
+          "function": [
+            "entity.name.function.bend"
+          ]
+        }
+      },
+      {
+        "language": "flow",
+        "scopes": {
+          "type": [
+            "entity.name.type.flow"
+          ],
+          "function": [
+            "entity.name.function.flow"
+          ]
+        }
+      }
     ]
   },
   "scripts": {

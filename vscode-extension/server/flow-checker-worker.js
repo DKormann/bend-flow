@@ -3113,7 +3113,10 @@ function tokenize(source, base) {
       index++;
       continue;
     }
-    if (char === "#") break;
+    if (char === "#") {
+      while (index < source.length && source[index] !== "\n") index++;
+      continue;
+    }
     if (/[A-Za-z_]/.test(char)) {
       const match = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(source.slice(index));
       tokens.push({ kind: "name", text: match[0], start: base + index, end: base + index + match[0].length });
@@ -3138,13 +3141,24 @@ function tokenize(source, base) {
       index = end;
       continue;
     }
+    const triple = source.slice(index, index + 3);
+    if (triple === "<&>") {
+      tokens.push({ kind: "symbol", text: triple, start: base + index, end: base + index + 3 });
+      index += 3;
+      continue;
+    }
+    if (char === "&" && /^[012]$/.test(source[index + 1] ?? "")) {
+      tokens.push({ kind: "quantity", text: source.slice(index, index + 2), start: base + index, end: base + index + 2 });
+      index += 2;
+      continue;
+    }
     const pair = source.slice(index, index + 2);
-    if (["->", "==", "=>"].includes(pair)) {
+    if (["->", "==", "=>", "<-", "<>"].includes(pair)) {
       tokens.push({ kind: "symbol", text: pair, start: base + index, end: base + index + 2 });
       index += 2;
       continue;
     }
-    if ("(){}<>,:|+-~".includes(char)) {
+    if ("(){}[]<>,:;|+-~&*^%".includes(char)) {
       tokens.push({ kind: "symbol", text: char, start: base + index, end: base + index + 1 });
       index++;
       continue;
@@ -3190,6 +3204,19 @@ var ExpressionParser = class {
   parseExpression(minimumBindingPower = 0) {
     let left = this.parsePrimary();
     while (true) {
+      if (this.current().text === "[") {
+        const start = left.span.start;
+        this.index++;
+        const index = this.parseExpression();
+        const close = this.expect("]");
+        if (this.take("<-")) {
+          const value = this.parseExpression();
+          left = { kind: "ArraySetExpression", target: left, index, value, span: { start, end: value.span.end } };
+        } else {
+          left = { kind: "IndexExpression", target: left, index, span: { start, end: close.end } };
+        }
+        continue;
+      }
       if (this.current().text === "<") {
         const start = left.span.start;
         const arguments_ = this.parseDelimited("<", ">");
@@ -3209,11 +3236,12 @@ var ExpressionParser = class {
         continue;
       }
       const operator = this.current();
-      const bindingPower = operator.text === "->" ? 1 : operator.text === "==" ? 2 : -1;
+      const bindingPower = operator.text === "->" ? 1 : operator.text === "&" ? 2 : operator.text === "==" ? 3 : operator.text === "<&>" ? 4 : operator.text === "<>" ? 5 : operator.text === "+" ? 10 : -1;
       if (bindingPower < minimumBindingPower) break;
       this.index++;
-      const right = this.parseExpression(operator.text === "->" ? bindingPower : bindingPower + 1);
-      left = operator.text === "->" ? { kind: "ArrowExpression", domain: left, codomain: right, span: { start: left.span.start, end: right.span.end } } : { kind: "EqualityExpression", left, right, span: { start: left.span.start, end: right.span.end } };
+      const rightAssociative = operator.text === "->" || operator.text === "&" || operator.text === "<&>" || operator.text === "<>";
+      const right = this.parseExpression(rightAssociative ? bindingPower : bindingPower + 1);
+      left = operator.text === "->" ? { kind: "ArrowExpression", domain: left, codomain: right, span: { start: left.span.start, end: right.span.end } } : operator.text === "==" ? { kind: "EqualityExpression", left, right, span: { start: left.span.start, end: right.span.end } } : { kind: "BinaryExpression", operator: operator.text, left, right, span: { start: left.span.start, end: right.span.end } };
     }
     return left;
   }
@@ -3262,6 +3290,18 @@ var ExpressionParser = class {
   }
   parsePrimary() {
     const token = this.current();
+    if (["+", "-", "~"].includes(token.text) && this.peek().kind === "name") {
+      this.index++;
+      const value = this.parsePrimary();
+      const quantity = token.text === "+" ? "many" : token.text === "-" ? "none" : "comptime";
+      return {
+        kind: "PrefixQuantityExpression",
+        quantity,
+        quantitySpan: { start: token.start, end: token.end },
+        value,
+        span: { start: token.start, end: value.span.end }
+      };
+    }
     if (token.kind === "name") {
       this.index++;
       return { kind: "Identifier", name: token.text, span: { start: token.start, end: token.end } };
@@ -3269,6 +3309,10 @@ var ExpressionParser = class {
     if (token.kind === "number") {
       this.index++;
       return { kind: "NumberExpression", value: token.text, span: { start: token.start, end: token.end } };
+    }
+    if (token.kind === "quantity") {
+      this.index++;
+      return { kind: "QuantExpression", value: token.text, span: { start: token.start, end: token.end } };
     }
     if (token.kind === "string") {
       this.index++;
@@ -3279,6 +3323,42 @@ var ExpressionParser = class {
         value = token.text.slice(1, -1);
       }
       return { kind: "StringExpression", value, raw: token.text, span: { start: token.start, end: token.end } };
+    }
+    if (this.take("%")) {
+      const open = token;
+      const proof = this.parseExpression();
+      this.expect(":");
+      const motive = this.parseExpression();
+      this.expect(";");
+      const value = this.parseExpression();
+      return { kind: "RewriteExpression", proof, motive, value, span: { start: open.start, end: value.span.end } };
+    }
+    if (this.take("[")) {
+      const open = token;
+      if (this.take("]")) return { kind: "ListExpression", values: [], span: { start: open.start, end: this.tokens[this.index - 1].end } };
+      const first = this.parseExpression();
+      if (this.take(":")) {
+        const type = this.parseExpression();
+        const operator = this.current();
+        if (!this.take("*") && !this.take("^")) throw new FlowParseError("Expected '*' or '^' in an array literal", { start: operator.start, end: operator.end });
+        const size = this.parseExpression();
+        const close2 = this.expect("]");
+        return {
+          kind: "ArrayExpression",
+          value: first,
+          type,
+          size,
+          mode: operator.text === "*" ? "count" : "depth",
+          span: { start: open.start, end: close2.end }
+        };
+      }
+      const values = [first];
+      while (this.take(",")) {
+        if (this.current().text === "]") break;
+        values.push(this.parseExpression());
+      }
+      const close = this.expect("]");
+      return { kind: "ListExpression", values, span: { start: open.start, end: close.end } };
     }
     if (this.take("{")) {
       const open = token;
@@ -3329,8 +3409,48 @@ var ExpressionParser = class {
   }
 };
 function expressionToPattern(expression) {
+  if (expression.kind === "PrefixQuantityExpression") {
+    const pattern = expressionToPattern(expression.value);
+    if (pattern.kind !== "NamePattern") throw new FlowParseError("A pattern quantity must modify a binder", expression.span);
+    return { ...pattern, quantity: expression.quantity, quantitySpan: expression.quantitySpan };
+  }
+  if (expression.kind === "NumberExpression" || expression.kind === "StringExpression") {
+    return { kind: "LiteralPattern", raw: expression.kind === "StringExpression" ? expression.raw : expression.value, span: expression.span };
+  }
+  if (expression.kind === "BinaryExpression" && expression.operator === "+" && expression.left.kind === "NumberExpression" && expression.left.value.endsWith("n")) {
+    return {
+      kind: "NatAddPattern",
+      amount: expression.left.value,
+      rest: expressionToPattern(expression.right),
+      span: expression.span
+    };
+  }
   if (expression.kind === "Identifier") {
     return { kind: "NamePattern", name: expression.name, span: expression.span };
+  }
+  if (expression.kind === "TupleExpression" && expression.fields.length > 1 && expression.fields.every((field) => !field.name)) {
+    const [first, ...rest] = expression.fields;
+    const tail = rest.length === 1 ? rest[0].type : {
+      kind: "TupleExpression",
+      fields: rest,
+      span: { start: rest[0].span.start, end: rest.at(-1).span.end }
+    };
+    return {
+      kind: "ConstructorPattern",
+      constructor: "Tuple",
+      typeArguments: [],
+      fields: [expressionToPattern(first.type), expressionToPattern(tail)],
+      span: expression.span
+    };
+  }
+  if (expression.kind === "BinaryExpression" && expression.operator === "<>") {
+    return {
+      kind: "ConstructorPattern",
+      constructor: "Con",
+      typeArguments: [],
+      fields: [expressionToPattern(expression.left), expressionToPattern(expression.right)],
+      span: expression.span
+    };
   }
   if (expression.kind === "ConstructorExpression") {
     let callee = expression.callee;
@@ -3381,6 +3501,7 @@ function topLevelIndex(source, wanted) {
   let round = 0;
   let curly = 0;
   let angle = 0;
+  let square = 0;
   let string = false;
   for (let index = 0; index < source.length; index++) {
     const char = source[index];
@@ -3397,9 +3518,11 @@ function topLevelIndex(source, wanted) {
     else if (char === ")") round--;
     else if (char === "{") curly++;
     else if (char === "}") curly--;
-    else if (char === "<") angle++;
+    else if (char === "<" && source[index + 1] !== "-") angle++;
     else if (char === ">" && source[index - 1] !== "-") angle--;
-    else if (char === wanted && round === 0 && curly === 0 && angle === 0) {
+    else if (char === "[") square++;
+    else if (char === "]") square--;
+    else if (char === wanted && round === 0 && curly === 0 && angle === 0 && square === 0) {
       if (wanted === "=" && (source[index + 1] === "=" || source[index - 1] === "=" || source[index - 1] === ">")) continue;
       return index;
     }
@@ -3413,6 +3536,29 @@ function matching(source, start, open, close) {
     else if (source[index] === close && --depth === 0) return index;
   }
   return -1;
+}
+function delimiterDepth(source) {
+  const closes = [];
+  let string = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (string) {
+      if (char === "\\") index++;
+      else if (char === '"') string = false;
+      continue;
+    }
+    if (char === '"') {
+      string = true;
+      continue;
+    }
+    if (char === "#") {
+      while (index < source.length && source[index] !== "\n") index++;
+      continue;
+    }
+    if (char === "(" || char === "{" || char === "[" || char === "<" && source[index + 1] !== "-") closes.push(char === "(" ? ")" : char === "{" ? "}" : char === "[" ? "]" : ">");
+    else if (closes.at(-1) === char) closes.pop();
+  }
+  return closes.length;
 }
 var FlowParser = class {
   constructor(source) {
@@ -3453,9 +3599,13 @@ var FlowParser = class {
       const expression2 = this.parseMatch(indent2);
       return { kind: "ExpressionStatement", expression: expression2, span: expression2.span };
     }
-    if (topLevelIndex(line.content, "=") >= 0) return this.parseDeclaration(indent2);
-    this.index++;
-    const expression = this.parseExpression(line.content, line.start + line.indent);
+    if (line.content.startsWith("%") && topLevelIndex(line.content, ";") < 0) return this.parseMultilineRewrite(indent2);
+    const equals = topLevelIndex(line.content, "=");
+    if (equals >= 0 && line.content.slice(0, equals).trimStart().startsWith("(")) return this.parsePatternDeclaration();
+    if (equals >= 0 || this.hasContinuedDeclarationHeader()) {
+      return this.parseDeclaration(indent2);
+    }
+    const expression = this.parseContinuedExpression(line.start + line.indent, line.end);
     return { kind: "ExpressionStatement", expression, span: expression.span };
   }
   parseImport() {
@@ -3484,20 +3634,80 @@ var FlowParser = class {
     const end = this.index < this.lines.length ? this.lines[this.index].start : this.source.length;
     return { kind: "RawBendDefinition", source: this.source.slice(start, end).replace(/\n+$/, ""), span: { start, end } };
   }
-  parseDeclaration(indent2) {
+  hasContinuedDeclarationHeader() {
+    const first = this.lines[this.index];
+    if (delimiterDepth(first.content) === 0 || !/^[+\-~]?[A-Za-z_][A-Za-z0-9_.]*\s*(?:<|\()/.test(first.content)) return false;
+    const start = first.start + first.indent;
+    for (let index = this.index; index < this.lines.length; index++) {
+      const source = this.source.slice(start, this.lines[index].end);
+      if (delimiterDepth(source) > 0) continue;
+      return topLevelIndex(source, "=") >= 0 && topLevelIndex(source, ":") >= 0;
+    }
+    return false;
+  }
+  parseMultilineRewrite(indent2) {
+    const line = this.lines[this.index++];
+    const colon = topLevelIndex(line.content, ":");
+    if (colon < 0) throw new FlowParseError("Expected ':' after the rewrite proof", { start: line.start + line.indent, end: line.end });
+    const proofSource = line.content.slice(1, colon).trim();
+    const motiveSource = line.content.slice(colon + 1).replace(/#.*$/, "").trim();
+    if (!proofSource || !motiveSource) throw new FlowParseError("Expected '%proof : motive'", { start: line.start + line.indent, end: line.end });
+    const proofColumn = line.content.indexOf(proofSource, 1);
+    const motiveColumn = line.content.indexOf(motiveSource, colon + 1);
+    const proof = this.parseExpression(proofSource, line.start + line.indent + proofColumn);
+    const motive = this.parseExpression(motiveSource, line.start + line.indent + motiveColumn);
+    while (this.index < this.lines.length && isTrivia(this.lines[this.index])) this.index++;
+    const bodyLine = this.lines[this.index];
+    if (!bodyLine || bodyLine.indent < indent2) throw new FlowParseError("Expected a rewrite body", { start: line.end, end: line.end });
+    const body = this.parseStatement(bodyLine.indent);
+    if (body.kind !== "ExpressionStatement") throw new FlowParseError("A rewrite body must be an expression", body.span);
+    const expression = {
+      kind: "RewriteExpression",
+      proof,
+      motive,
+      value: body.expression,
+      span: { start: line.start + line.indent, end: body.span.end }
+    };
+    return { kind: "ExpressionStatement", expression, span: expression.span };
+  }
+  parsePatternDeclaration() {
     const line = this.lines[this.index++];
     const equals = topLevelIndex(line.content, "=");
-    const header = line.content.slice(0, equals).trimEnd();
-    const inlineBody = line.content.slice(equals + 1).trim();
-    const parsed = this.parseDeclarationHeader(header, line.start + line.indent);
+    const patternSource = line.content.slice(0, equals).trim();
+    const patternColumn = line.content.indexOf(patternSource);
+    const pattern = expressionToPattern(this.parseExpression(patternSource, line.start + line.indent + patternColumn));
+    const valueSource = line.content.slice(equals + 1).trim();
+    if (!valueSource) throw new FlowParseError("Expected a value after '='", { start: line.end, end: line.end });
+    const valueColumn = line.content.indexOf(valueSource, equals + 1);
+    const value = this.parseContinuedExpression(line.start + line.indent + valueColumn, line.end);
+    return { kind: "PatternDeclaration", pattern, value, span: { start: pattern.span.start, end: value.span.end } };
+  }
+  parseDeclaration(indent2) {
+    const first = this.lines[this.index];
+    const start = first.start + first.indent;
+    let end = first.end;
+    let equals = -1;
+    while (this.index < this.lines.length) {
+      const line = this.lines[this.index++];
+      end = line.end;
+      const source = this.source.slice(start, end);
+      equals = topLevelIndex(source, "=");
+      if (equals >= 0) break;
+      if (delimiterDepth(source) === 0) break;
+    }
+    const declarationSource = this.source.slice(start, end);
+    if (equals < 0) throw new FlowParseError("Expected '=' after the declaration header", { start, end });
+    const header = declarationSource.slice(0, equals).trimEnd();
+    const inlineBody = declarationSource.slice(equals + 1).trim();
+    const parsed = this.parseDeclarationHeader(header, start);
     let body;
     if (inlineBody) {
-      const bodyColumn = line.content.indexOf(inlineBody, equals + 1);
-      body = this.parseExpression(inlineBody, line.start + line.indent + bodyColumn);
+      const bodyOffset = declarationSource.indexOf(inlineBody, equals + 1);
+      body = this.parseContinuedExpression(start + bodyOffset, end);
     } else {
       const childIndent = this.nextContentIndent();
       if (childIndent === null || childIndent <= indent2) {
-        throw new FlowParseError(`Expected an indented body for '${parsed.name.name}'`, { start: line.end, end: line.end });
+        throw new FlowParseError(`Expected an indented body for '${parsed.name.name}'`, { start: end, end });
       }
       if (this.lines[this.index].content.trimStart().startsWith("|")) {
         body = this.parseMultilineUnion(childIndent);
@@ -3506,7 +3716,7 @@ var FlowParser = class {
         body = {
           kind: "Block",
           statements,
-          span: { start: statements[0]?.span.start ?? line.end, end: statements.at(-1)?.span.end ?? line.end }
+          span: { start: statements[0]?.span.start ?? end, end: statements.at(-1)?.span.end ?? end }
         };
       }
     }
@@ -3514,7 +3724,7 @@ var FlowParser = class {
       kind: "Declaration",
       ...parsed,
       body,
-      span: { start: line.start + line.indent, end: body.span.end }
+      span: { start, end: body.span.end }
     };
   }
   parseDeclarationHeader(header, base) {
@@ -3566,10 +3776,17 @@ var FlowParser = class {
         continue;
       }
       if (line.indent !== indent2 || !line.content.startsWith("|")) break;
-      const expression = this.parseExpression(line.content, line.start + line.indent);
+      const start = line.start + line.indent;
+      this.index++;
+      while (this.index < this.lines.length) {
+        const next = this.lines[this.index];
+        if (!isTrivia(next) && next.indent <= indent2) break;
+        this.index++;
+      }
+      const end = this.index < this.lines.length ? this.lines[this.index].start : this.source.length;
+      const expression = this.parseExpression(this.source.slice(start, end).replace(/\s+$/, ""), start);
       if (expression.kind !== "UnionExpression") throw new FlowParseError("Expected a union variant", expression.span);
       variants.push(...expression.variants);
-      this.index++;
     }
     if (!variants.length) throw new FlowParseError("Expected at least one union variant", { start: this.lines[this.index]?.start ?? this.source.length, end: this.lines[this.index]?.end ?? this.source.length });
     return { kind: "UnionExpression", variants, span: { start: variants[0].span.start, end: variants.at(-1).span.end } };
@@ -3634,6 +3851,16 @@ var FlowParser = class {
     if (!cases.length) throw new FlowParseError("A match requires at least one case", { start: line.end, end: line.end });
     return { kind: "MatchExpression", scrutinee, cases, span: { start: line.start + line.indent, end: cases.at(-1).span.end } };
   }
+  parseContinuedExpression(start, initialEnd) {
+    let end = initialEnd;
+    const first = this.lines.findIndex((line) => line.start <= start && start <= line.end);
+    if (this.index <= first) this.index = first + 1;
+    while (delimiterDepth(this.source.slice(start, end)) > 0 && this.index < this.lines.length) {
+      end = this.lines[this.index].end;
+      this.index++;
+    }
+    return this.parseExpression(this.source.slice(start, end), start);
+  }
   parseExpression(source, base) {
     return new ExpressionParser(source, base).parse();
   }
@@ -3673,22 +3900,27 @@ function indent(text, spaces = 2) {
   const prefix = " ".repeat(spaces);
   return text.split("\n").map((line) => line ? prefix + line : line).join("\n");
 }
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 var FlowLowerer = class {
   constructor(program) {
     this.program = program;
   }
   imports = [];
-  hoisted = [];
   regular = [];
   global = /* @__PURE__ */ new Map();
   hasBaseImport = false;
+  nextMatchHelper = 0;
+  expectedTypes = [];
+  expectedTypeNodes = [];
   lower() {
     for (const statement of this.program.statements) this.lowerTopStatement(statement);
     const output = new Writer();
     if (this.hasBaseImport) output.line("import Base");
     for (const imported of this.imports) append(output, imported);
     if (this.hasBaseImport || this.imports.length) output.line();
-    for (const snippet of [...this.hoisted, ...this.regular]) {
+    for (const snippet of this.regular) {
       append(output, snippet);
       if (!output.text.endsWith("\n\n")) output.line();
     }
@@ -3727,6 +3959,7 @@ var FlowLowerer = class {
       this.lowerDeclaration(statement, statement.name.name, this.global, false);
       return;
     }
+    if (statement.kind === "PatternDeclaration") throw new Error("Flow destructuring declarations must be inside a definition");
     const type = this.expressionType(statement.expression, this.global) ?? "Type";
     const writer = new Writer();
     writer.line(`def main() -> ${type}:`, statement.span);
@@ -3734,14 +3967,15 @@ var FlowLowerer = class {
     this.regular.push({ text: writer.text, mappings: writer.mappings });
   }
   lowerDeclaration(node, target, outer, nested) {
-    const typeDeclaration = node.body.kind === "UnionExpression" || node.body.kind === "TupleExpression";
+    const returnsKind = node.returnType.kind === "Identifier" && (node.returnType.name === "Type" || node.returnType.name === "Data") || node.returnType.kind === "CallExpression" && node.returnType.callee.kind === "Identifier" && node.returnType.callee.name === "Kind";
+    const typeDeclaration = returnsKind && (node.body.kind === "UnionExpression" || node.body.kind === "TupleExpression");
     const kind = typeDeclaration ? "type" : node.parameters.length ? "function" : "value";
     outer.set(node.name.name, { kind, target, span: node.name.span, type: node.returnType });
     const scope = new Map(outer);
     this.bindFields(node.typeParameters, scope);
     this.bindFields(node.parameters, scope);
     const snippet = typeDeclaration ? this.lowerTypeDeclaration(node, target, scope, outer) : this.lowerValueDeclaration(node, target, scope);
-    (nested ? this.hoisted : this.regular).push(snippet);
+    this.regular.push(snippet);
   }
   lowerTypeDeclaration(node, target, scope, outer) {
     const writer = new Writer();
@@ -3755,8 +3989,9 @@ var FlowLowerer = class {
     if (node.body.kind === "UnionExpression") {
       for (const variant of node.body.variants) {
         const constructor = target.includes(".") ? `${target}.${variant.name.name}` : variant.name.name;
-        outer.set(variant.name.name, { kind: "constructor", target: constructor, owner: target, span: variant.name.span });
-        scope.set(variant.name.name, { kind: "constructor", target: constructor, owner: target, span: variant.name.span });
+        const constructorSymbol = { kind: "constructor", target: constructor, owner: target, span: variant.name.span, fieldTypes: variant.fields.map((field) => field.type) };
+        outer.set(variant.name.name, constructorSymbol);
+        scope.set(variant.name.name, constructorSymbol);
         writer.write("  ");
         writer.write(constructor, variant.name.span);
         writer.write("{");
@@ -3807,16 +4042,17 @@ var FlowLowerer = class {
     writer.write(") -> ");
     writer.write(this.renderType(node.returnType, scope), node.returnType.span);
     writer.line(":");
+    const expectedType = this.renderType(node.returnType, scope);
     if (node.body.kind === "Block") {
-      const body = this.renderBlock(node.body, scope, target);
+      const body = this.renderBlock(node.body, scope, target, expectedType, node.returnType);
       writer.write(indent(body.text), node.body.span);
       if (!writer.text.endsWith("\n")) writer.line();
     } else {
-      writer.line("  " + this.renderExpression(node.body, scope), node.body.span);
+      writer.line("  " + this.renderExpected(node.body, scope, expectedType, node.returnType), node.body.span);
     }
     return { text: writer.text, mappings: writer.mappings };
   }
-  renderBlock(block, parent, owner) {
+  renderBlock(block, parent, owner, expectedType, expectedTypeNode) {
     const writer = new Writer();
     const scope = new Map(parent);
     for (const statement of block.statements) {
@@ -3825,14 +4061,20 @@ var FlowLowerer = class {
       } else if (statement.kind === "RawBendDefinition") {
         writer.line(statement.source, statement.span);
       } else if (statement.kind === "ExpressionStatement") {
-        writer.line(this.renderExpression(statement.expression, scope), statement.span);
+        const isLast = statement === block.statements.at(-1);
+        writer.line(isLast && expectedType ? this.renderExpected(statement.expression, scope, expectedType, expectedTypeNode) : this.renderExpression(statement.expression, scope), statement.span);
+      } else if (statement.kind === "PatternDeclaration") {
+        const valueType = this.expressionTypeNode(statement.value, scope);
+        const value = this.renderExpression(statement.value, scope);
+        const pattern = this.renderPattern(statement.pattern, scope, valueType);
+        writer.line(`${pattern} = ${value}`, statement.span);
       } else {
         const needsLift = statement.parameters.length > 0 || statement.body.kind === "UnionExpression" || statement.body.kind === "TupleExpression";
         if (needsLift) {
           const target = `${owner}.${statement.name.name}`;
           this.lowerDeclaration(statement, target, scope, true);
         } else {
-          scope.set(statement.name.name, { kind: "binding", target: statement.name.name, span: statement.name.span, type: statement.returnType, quantity: statement.quantity });
+          scope.set(statement.name.name, { kind: "local", target: statement.name.name, span: statement.name.span, type: statement.returnType, quantity: statement.quantity });
           writer.write(this.quantityMarker(statement.quantity), statement.quantitySpan);
           writer.write(statement.name.name, statement.name.span);
           writer.write(": ");
@@ -3841,7 +4083,7 @@ var FlowLowerer = class {
           if (statement.body.kind === "Block") {
             const helper = `${owner}.${statement.name.name}`;
             const free = this.freeBlockNames(statement.body);
-            const captures = [...scope.entries()].filter(([name, symbol]) => name !== statement.name.name && free.has(name) && symbol.kind === "binding" && symbol.type);
+            const captures = [...scope.entries()].filter(([name, symbol]) => name !== statement.name.name && free.has(name) && (symbol.kind === "binding" || symbol.kind === "local") && symbol.type);
             const lifted = new Writer();
             lifted.write("def ");
             lifted.write(helper, statement.name.span);
@@ -3856,18 +4098,28 @@ var FlowLowerer = class {
             lifted.write(") -> ");
             lifted.write(this.renderType(statement.returnType, scope), statement.returnType.span);
             lifted.line(":");
-            const nested = this.renderBlock(statement.body, scope, helper);
+            const nested = this.renderBlock(statement.body, scope, helper, this.renderType(statement.returnType, scope), statement.returnType);
             lifted.write(indent(nested.text), statement.body.span);
             if (!lifted.text.endsWith("\n")) lifted.line();
-            this.hoisted.push({ text: lifted.text, mappings: lifted.mappings });
+            this.regular.push({ text: lifted.text, mappings: lifted.mappings });
             writer.line(`${helper}(${captures.map(([name]) => name).join(", ")})`, statement.body.span);
           } else {
-            writer.line(this.renderExpression(statement.body, scope), statement.body.span);
+            writer.line(this.renderExpected(statement.body, scope, this.renderType(statement.returnType, scope), statement.returnType), statement.body.span);
           }
         }
       }
     }
     return { text: writer.text, mappings: writer.mappings };
+  }
+  renderExpected(node, scope, type, typeNode) {
+    this.expectedTypes.push(type);
+    if (typeNode) this.expectedTypeNodes.push(typeNode);
+    try {
+      return this.renderExpression(node, scope);
+    } finally {
+      this.expectedTypes.pop();
+      if (typeNode) this.expectedTypeNodes.pop();
+    }
   }
   renderExpression(node, scope) {
     switch (node.kind) {
@@ -3880,14 +4132,37 @@ var FlowLowerer = class {
       }
       case "NumberExpression":
         return node.value;
+      case "QuantExpression":
+        return node.value;
+      case "PrefixQuantityExpression":
+        return `${this.quantityMarker(node.quantity)}${this.renderExpression(node.value, scope)}`;
       case "StringExpression":
         return node.raw;
-      case "ArrowExpression":
+      case "ListExpression":
+        return `[${node.values.map((value) => this.renderExpression(value, scope)).join(", ")}]`;
+      case "ArrayExpression":
+        return `[${this.renderExpression(node.value, scope)} : ${this.renderType(node.type, scope)}${node.mode === "count" ? "*" : "^"}${this.renderExpression(node.size, scope)}]`;
+      case "IndexExpression":
+        return `${this.renderExpression(node.target, scope)}[${this.renderExpression(node.index, scope)}]`;
+      case "ArraySetExpression":
+        return `${this.renderExpression(node.target, scope)}[${this.renderExpression(node.index, scope)}] <- ${this.renderExpression(node.value, scope)}`;
+      case "RewriteExpression":
+        return `%${this.renderExpression(node.proof, scope)} : ${this.renderExpression(node.motive, scope)}; ${this.renderExpression(node.value, scope)}`;
+      case "ArrowExpression": {
+        if (node.domain.kind === "TupleExpression" && node.domain.fields.length > 0 && node.domain.fields.every((field) => field.name)) {
+          const binders = node.domain.fields.map(
+            (field) => `@${this.quantityMarker(field.quantity)}${field.name.name}: ${this.renderType(field.type, scope)} -> `
+          ).join("");
+          return binders + this.renderExpression(node.codomain, scope);
+        }
         return `${this.renderExpression(node.domain, scope)} -> ${this.renderExpression(node.codomain, scope)}`;
+      }
       case "EqualityExpression": {
         const type = this.inferEqualityType(node.left, node.right, scope);
         return `{${this.renderExpression(node.left, scope)} == ${this.renderExpression(node.right, scope)} : ${type}}`;
       }
+      case "BinaryExpression":
+        return `${this.renderExpression(node.left, scope)} ${node.operator} ${this.renderExpression(node.right, scope)}`;
       case "TypedEqualityExpression":
         return `{${this.renderExpression(node.left, scope)} == ${this.renderExpression(node.right, scope)} : ${this.renderType(node.type, scope)}}`;
       case "ReflexivityExpression":
@@ -3918,32 +4193,72 @@ var FlowLowerer = class {
       case "UnionExpression":
         throw new Error("An inline union must be lifted before expression rendering");
       case "MatchExpression": {
-        const lines = [`match ${this.renderExpression(node.scrutinee, scope)}:`];
-        for (const item of node.cases) lines.push(...this.renderCase(item, scope).split("\n").map((line) => "  " + line));
-        return lines.join("\n");
+        const symbol = node.scrutinee.kind === "Identifier" ? scope.get(node.scrutinee.name) : void 0;
+        if (node.scrutinee.kind === "Identifier" && symbol?.kind === "binding") {
+          return this.renderMatch(node, scope);
+        }
+        const scrutineeType = this.expressionType(node.scrutinee, scope);
+        const resultType = this.expectedTypes.at(-1) ?? this.matchResultType(node, scope) ?? null;
+        if (!scrutineeType || !resultType) return this.renderMatch(node, scope);
+        const id = this.nextMatchHelper++;
+        const helper = `__flow_match_${id}`;
+        const value = `__flow_match_value_${id}`;
+        const free = this.freeMatchNames(node);
+        const typeNames = `${scrutineeType} ${resultType}`;
+        const captures = [...scope.entries()].filter(
+          ([name, item]) => (item.kind === "binding" || item.kind === "local") && item.type && (free.has(name) || new RegExp(`\\b${escapeRegExp(name)}\\b`).test(typeNames))
+        );
+        const helperScope = new Map([...scope].filter(([, item]) => item.kind !== "binding" && item.kind !== "local"));
+        helperScope.set(value, { kind: "binding", target: value, span: node.scrutinee.span });
+        for (const [name, item] of captures) helperScope.set(name, item);
+        const writer = new Writer();
+        writer.write(`def ${helper}(`);
+        for (const [name, item] of captures) {
+          writer.write(`${this.quantityMarker(item.quantity ?? "lone")}${name}: ${this.renderType(item.type, scope)}, `);
+        }
+        writer.write(`${value}: ${scrutineeType}`);
+        writer.line(`) -> ${resultType}:`);
+        const lifted = {
+          ...node,
+          scrutinee: { kind: "Identifier", name: value, span: node.scrutinee.span }
+        };
+        writer.write(indent(this.renderMatch(lifted, helperScope)), node.span);
+        writer.line();
+        this.regular.push({ text: writer.text, mappings: writer.mappings });
+        const arguments_ = [...captures.map(([, item]) => item.target), this.renderExpression(node.scrutinee, scope)];
+        return `${helper}(${arguments_.join(", ")})`;
       }
       case "DoExpression":
         return [`do ${this.renderExpression(node.effect, scope)}:`, ...node.statements.map((statement) => "  " + statement.source)].join("\n");
     }
   }
-  renderCase(item, parent) {
+  renderMatch(node, scope) {
+    const lines = [`match ${this.renderExpression(node.scrutinee, scope)}:`];
+    const scrutineeType = this.expressionTypeNode(node.scrutinee, scope);
+    for (const item of node.cases) lines.push(...this.renderCase(item, scope, scrutineeType).split("\n").map((line) => "  " + line));
+    return lines.join("\n");
+  }
+  renderCase(item, parent, scrutineeType) {
     const scope = new Map(parent);
-    const pattern = this.renderPattern(item.pattern, scope);
+    const pattern = this.renderPattern(item.pattern, scope, scrutineeType);
     const body = item.body.kind === "Block" ? this.renderBlock(item.body, scope, "case").text : this.renderExpression(item.body, scope);
     return `case ${pattern}:
 ${indent(body)}`;
   }
-  renderPattern(node, scope) {
+  renderPattern(node, scope, type) {
     if (node.kind === "NamePattern") {
       if (node.name === "_") return "_";
       const symbol2 = scope.get(node.name);
       if (symbol2?.kind === "constructor") return `${symbol2.target}{}`;
-      scope.set(node.name, { kind: "binding", target: node.name, span: node.span });
-      return node.name;
+      scope.set(node.name, { kind: "binding", target: node.name, span: node.span, type, quantity: node.quantity });
+      return `${this.quantityMarker(node.quantity ?? "lone")}${node.name}`;
     }
+    if (node.kind === "LiteralPattern") return node.raw;
+    if (node.kind === "NatAddPattern") return `${node.amount}+${this.renderPattern(node.rest, scope, type)}`;
     const symbol = scope.get(node.constructor);
     const constructor = symbol?.kind === "constructor" ? symbol.target : node.constructor;
-    return `${constructor}{${node.fields.map((field) => this.renderPattern(field, scope)).join(", ")}}`;
+    const fieldTypes = node.constructor === "Tuple" && type?.kind === "BinaryExpression" && type.operator === "&" ? [type.left, type.right] : symbol?.fieldTypes ?? [];
+    return `${constructor}{${node.fields.map((field, index) => this.renderPattern(field, scope, fieldTypes[index])).join(", ")}}`;
   }
   renderType(node, scope) {
     return this.renderExpression(node, scope);
@@ -3960,13 +4275,40 @@ ${indent(body)}`;
           if (!bound.has(node.name)) names.add(node.name);
           return;
         case "NumberExpression":
+        case "QuantExpression":
         case "StringExpression":
+          return;
+        case "PrefixQuantityExpression":
+          visit(node.value, bound);
+          return;
+        case "ListExpression":
+          node.values.forEach((value) => visit(value, bound));
+          return;
+        case "ArrayExpression":
+          visit(node.value, bound);
+          visit(node.type, bound);
+          visit(node.size, bound);
+          return;
+        case "IndexExpression":
+          visit(node.target, bound);
+          visit(node.index, bound);
+          return;
+        case "ArraySetExpression":
+          visit(node.target, bound);
+          visit(node.index, bound);
+          visit(node.value, bound);
+          return;
+        case "RewriteExpression":
+          visit(node.proof, bound);
+          visit(node.motive, bound);
+          visit(node.value, bound);
           return;
         case "ArrowExpression":
           visit(node.domain, bound);
           visit(node.codomain, bound);
           return;
         case "EqualityExpression":
+        case "BinaryExpression":
           visit(node.left, bound);
           visit(node.right, bound);
           return;
@@ -4000,7 +4342,8 @@ ${indent(body)}`;
             const bindPattern = (pattern) => {
               if (pattern.kind === "NamePattern") {
                 if (pattern.name !== "_") inner.add(pattern.name);
-              } else pattern.fields.forEach(bindPattern);
+              } else if (pattern.kind === "ConstructorPattern") pattern.fields.forEach(bindPattern);
+              else if (pattern.kind === "NatAddPattern") bindPattern(pattern.rest);
             };
             bindPattern(item.pattern);
             if (item.body.kind === "Block") visitBlock(item.body, inner);
@@ -4019,7 +4362,16 @@ ${indent(body)}`;
       const bound = new Set(inherited);
       for (const statement of value.statements) {
         if (statement.kind === "ExpressionStatement") visit(statement.expression, bound);
-        else if (statement.kind === "Declaration") {
+        else if (statement.kind === "PatternDeclaration") {
+          visit(statement.value, bound);
+          const bind = (pattern) => {
+            if (pattern.kind === "NamePattern") {
+              if (pattern.name !== "_") bound.add(pattern.name);
+            } else if (pattern.kind === "ConstructorPattern") pattern.fields.forEach(bind);
+            else if (pattern.kind === "NatAddPattern") bind(pattern.rest);
+          };
+          bind(statement.pattern);
+        } else if (statement.kind === "Declaration") {
           statement.typeParameters.forEach((field) => visit(field.type, bound));
           statement.parameters.forEach((field) => visit(field.type, bound));
           visit(statement.returnType, bound);
@@ -4031,6 +4383,137 @@ ${indent(body)}`;
     };
     visitBlock(block);
     return names;
+  }
+  freeMatchNames(node) {
+    const names = /* @__PURE__ */ new Set();
+    const visit = (expression, bound) => {
+      switch (expression.kind) {
+        case "Identifier":
+          if (!bound.has(expression.name)) names.add(expression.name);
+          return;
+        case "NumberExpression":
+        case "QuantExpression":
+        case "StringExpression":
+        case "ReflexivityExpression":
+          return;
+        case "PrefixQuantityExpression":
+          visit(expression.value, bound);
+          return;
+        case "ListExpression":
+          expression.values.forEach((value) => visit(value, bound));
+          return;
+        case "ArrayExpression":
+          visit(expression.value, bound);
+          visit(expression.type, bound);
+          visit(expression.size, bound);
+          return;
+        case "IndexExpression":
+          visit(expression.target, bound);
+          visit(expression.index, bound);
+          return;
+        case "ArraySetExpression":
+          visit(expression.target, bound);
+          visit(expression.index, bound);
+          visit(expression.value, bound);
+          return;
+        case "RewriteExpression":
+          visit(expression.proof, bound);
+          visit(expression.motive, bound);
+          visit(expression.value, bound);
+          return;
+        case "ArrowExpression":
+          visit(expression.domain, bound);
+          visit(expression.codomain, bound);
+          return;
+        case "EqualityExpression":
+        case "BinaryExpression":
+          visit(expression.left, bound);
+          visit(expression.right, bound);
+          return;
+        case "TypedEqualityExpression":
+          visit(expression.left, bound);
+          visit(expression.right, bound);
+          visit(expression.type, bound);
+          return;
+        case "AnnotationExpression":
+          visit(expression.value, bound);
+          visit(expression.type, bound);
+          return;
+        case "CallExpression":
+        case "TypeApplicationExpression":
+        case "ConstructorExpression":
+          visit(expression.callee, bound);
+          expression.arguments.forEach((item) => visit(item, bound));
+          return;
+        case "TupleExpression":
+          expression.fields.forEach((field) => visit(field.type, bound));
+          return;
+        case "UnionExpression":
+          expression.variants.forEach((variant) => variant.fields.forEach((field) => visit(field.type, bound)));
+          return;
+        case "MatchExpression":
+          visit(expression.scrutinee, bound);
+          for (const item of expression.cases) visitCase(item, bound);
+          return;
+        case "DoExpression":
+          visit(expression.effect, bound);
+          for (const statement of expression.statements) {
+            for (const match of statement.source.matchAll(/[A-Za-z_][A-Za-z0-9_.]*/g)) if (!bound.has(match[0])) names.add(match[0]);
+          }
+          return;
+      }
+    };
+    const bindPattern = (pattern, bound) => {
+      if (pattern.kind === "NamePattern") {
+        if (pattern.name !== "_") bound.add(pattern.name);
+      } else if (pattern.kind === "ConstructorPattern") pattern.fields.forEach((field) => bindPattern(field, bound));
+      else if (pattern.kind === "NatAddPattern") bindPattern(pattern.rest, bound);
+    };
+    const visitBlock = (block, inherited) => {
+      const bound = new Set(inherited);
+      for (const statement of block.statements) {
+        if (statement.kind === "ExpressionStatement") {
+          visit(statement.expression, bound);
+        } else if (statement.kind === "PatternDeclaration") {
+          visit(statement.value, bound);
+          bindPattern(statement.pattern, bound);
+        } else if (statement.kind === "Declaration") {
+          statement.typeParameters.forEach((field) => visit(field.type, bound));
+          statement.parameters.forEach((field) => visit(field.type, bound));
+          visit(statement.returnType, bound);
+          const bodyBound = new Set(bound).add(statement.name.name);
+          if (statement.body.kind === "Block") visitBlock(statement.body, bodyBound);
+          else visit(statement.body, bodyBound);
+          bound.add(statement.name.name);
+        }
+      }
+    };
+    const visitCase = (item, inherited) => {
+      const bound = new Set(inherited);
+      bindPattern(item.pattern, bound);
+      if (item.body.kind === "Block") visitBlock(item.body, bound);
+      else visit(item.body, bound);
+    };
+    for (const item of node.cases) visitCase(item, /* @__PURE__ */ new Set());
+    return names;
+  }
+  matchResultType(node, scope) {
+    for (const item of node.cases) {
+      const body = item.body;
+      if (body.kind !== "Block") {
+        const type = this.expressionType(body, scope);
+        if (type) return type;
+        continue;
+      }
+      const last = body.statements.at(-1);
+      if (last?.kind === "ExpressionStatement") {
+        const type = this.expressionType(last.expression, scope);
+        if (type) return type;
+      } else if (last?.kind === "Declaration") {
+        return this.renderType(last.returnType, scope);
+      }
+    }
+    return null;
   }
   quantityMarker(quantity) {
     return quantity === "many" ? "+" : quantity === "none" ? "-" : quantity === "comptime" ? "~" : "";
@@ -4049,13 +4532,52 @@ ${indent(body)}`;
     }
     return "Type";
   }
+  expressionTypeNode(node, scope) {
+    if (node.kind === "Identifier") return scope.get(node.name)?.type;
+    if (node.kind === "AnnotationExpression") return node.type;
+    if (node.kind === "RewriteExpression" || node.kind === "PrefixQuantityExpression") return this.expressionTypeNode(node.value, scope);
+    if (node.kind === "CallExpression") {
+      let callee = node.callee;
+      if (callee.kind === "TypeApplicationExpression") callee = callee.callee;
+      if (callee.kind === "Identifier") return scope.get(callee.name)?.type;
+    }
+    return void 0;
+  }
   expressionType(node, scope) {
     if (node.kind === "Identifier") {
       const type = scope.get(node.name)?.type;
       return type ? this.renderType(type, scope) : null;
     }
     if (node.kind === "StringExpression") return "String";
+    if (node.kind === "QuantExpression") return "Quant";
+    if (node.kind === "PrefixQuantityExpression") return this.expressionType(node.value, scope);
+    if (node.kind === "ArrayExpression") return `Array<${this.renderType(node.type, scope)}>`;
+    if (node.kind === "IndexExpression") return "U32";
+    if (node.kind === "ArraySetExpression") return this.expressionType(node.target, scope);
+    if (node.kind === "RewriteExpression") return this.expressionType(node.value, scope);
     if (node.kind === "NumberExpression") return node.value.endsWith("n") ? "Nat" : node.value.includes(".") ? "F32" : "U32";
+    if (node.kind === "AnnotationExpression") return this.renderType(node.type, scope);
+    if (node.kind === "CallExpression") {
+      let callee = node.callee;
+      if (callee.kind === "TypeApplicationExpression") callee = callee.callee;
+      if (callee.kind === "Identifier") {
+        const type = scope.get(callee.name)?.type;
+        return type ? this.renderType(type, scope) : null;
+      }
+      return null;
+    }
+    if (node.kind === "ConstructorExpression") {
+      let callee = node.callee;
+      let arguments_ = [];
+      if (callee.kind === "TypeApplicationExpression") {
+        arguments_ = callee.arguments;
+        callee = callee.callee;
+      }
+      if (callee.kind !== "Identifier") return null;
+      const owner = scope.get(callee.name)?.owner;
+      return owner ? `${owner}${arguments_.length ? `<${arguments_.map((item) => this.renderType(item, scope)).join(", ")}>` : ""}` : null;
+    }
+    if (node.kind === "MatchExpression") return this.matchResultType(node, scope);
     return null;
   }
 };
@@ -4102,6 +4624,10 @@ var NavigationBuilder = class {
       case "Declaration":
         this.visitDeclaration(statement, scope);
         return;
+      case "PatternDeclaration":
+        this.visitExpression(statement.value, scope);
+        this.visitPattern(statement.pattern, scope);
+        return;
       case "ExpressionStatement":
         this.visitExpression(statement.expression, scope);
         return;
@@ -4141,13 +4667,47 @@ var NavigationBuilder = class {
         this.reference(scope, node.name, node.span);
         return;
       case "NumberExpression":
+      case "QuantExpression":
       case "StringExpression":
         return;
-      case "ArrowExpression":
-        this.visitExpression(node.domain, scope);
-        this.visitExpression(node.codomain, scope);
+      case "PrefixQuantityExpression":
+        this.visitExpression(node.value, scope);
         return;
+      case "ListExpression":
+        node.values.forEach((value) => this.visitExpression(value, scope));
+        return;
+      case "ArrayExpression":
+        this.visitExpression(node.value, scope);
+        this.visitExpression(node.type, scope);
+        this.visitExpression(node.size, scope);
+        return;
+      case "IndexExpression":
+        this.visitExpression(node.target, scope);
+        this.visitExpression(node.index, scope);
+        return;
+      case "ArraySetExpression":
+        this.visitExpression(node.target, scope);
+        this.visitExpression(node.index, scope);
+        this.visitExpression(node.value, scope);
+        return;
+      case "RewriteExpression":
+        this.visitExpression(node.proof, scope);
+        this.visitExpression(node.motive, scope);
+        this.visitExpression(node.value, scope);
+        return;
+      case "ArrowExpression": {
+        if (node.domain.kind === "TupleExpression" && node.domain.fields.length > 0 && node.domain.fields.every((field) => field.name)) {
+          const arrowScope = childScope(scope);
+          this.visitFields(node.domain.fields, arrowScope, true);
+          this.visitExpression(node.codomain, arrowScope);
+        } else {
+          this.visitExpression(node.domain, scope);
+          this.visitExpression(node.codomain, scope);
+        }
+        return;
+      }
       case "EqualityExpression":
+      case "BinaryExpression":
         this.visitExpression(node.left, scope);
         this.visitExpression(node.right, scope);
         return;
@@ -4216,7 +4776,11 @@ var NavigationBuilder = class {
       node.fields.forEach((field) => this.visitPattern(field, scope));
       return;
     }
-    if (node.name === "_") return;
+    if (node.kind === "NatAddPattern") {
+      this.visitPattern(node.rest, scope);
+      return;
+    }
+    if (node.kind === "LiteralPattern" || node.name === "_") return;
     const existing = scope.get(node.name);
     if (existing?.kind === "constructor") this.reference(scope, node.name, node.span);
     else this.bind(scope, node.name, node.span, "binding");
@@ -4267,26 +4831,235 @@ function compilerOffset(text, compilerText, offset) {
 }
 function renderFlowTypedHovers(source, program) {
   const declarations = /* @__PURE__ */ new Map();
-  const visitStatements = (statements, depth) => {
-    for (const statement of statements) if (statement.kind === "Declaration") visitDeclaration(statement, depth);
+  const aliases = /* @__PURE__ */ new Map();
+  const typeFunctions = /* @__PURE__ */ new Map();
+  const constructors = /* @__PURE__ */ new Map();
+  for (const statement of program.statements) {
+    if (statement.kind !== "Declaration" || statement.body.kind === "Block") continue;
+    aliases.set(statement.name.name, statement.body);
+    if (statement.parameters.length > 0) {
+      typeFunctions.set(statement.name.name, {
+        parameters: statement.parameters.flatMap((field) => field.name ? [field.name.name] : []),
+        body: statement.body
+      });
+    }
+    if (statement.body.kind !== "UnionExpression") continue;
+    for (const variant of statement.body.variants) {
+      const info = {
+        owner: statement.name.name,
+        parameters: statement.typeParameters.flatMap((field) => field.name ? [field.name.name] : []),
+        fields: variant.fields.map((field) => field.type)
+      };
+      constructors.set(variant.name.name, info);
+      const leaf = variant.name.name.split(".").at(-1);
+      if (!constructors.has(leaf)) constructors.set(leaf, info);
+    }
+  }
+  const substitute = (type, values) => {
+    if (type.kind === "Identifier") return values.get(type.name) ?? type;
+    if (type.kind === "CallExpression" || type.kind === "TypeApplicationExpression") return { ...type, callee: substitute(type.callee, values), arguments: type.arguments.map((item) => substitute(item, values)) };
+    if (type.kind === "ArrowExpression") return { ...type, domain: substitute(type.domain, values), codomain: substitute(type.codomain, values) };
+    if (type.kind === "EqualityExpression" || type.kind === "BinaryExpression") return { ...type, left: substitute(type.left, values), right: substitute(type.right, values) };
+    if (type.kind === "TypedEqualityExpression") return { ...type, left: substitute(type.left, values), right: substitute(type.right, values), type: substitute(type.type, values) };
+    if (type.kind === "AnnotationExpression") return { ...type, value: substitute(type.value, values), type: substitute(type.type, values) };
+    return type;
   };
-  const visitDeclaration = (node, depth) => {
+  const resolve3 = (original) => {
+    let type = original;
+    const seen = /* @__PURE__ */ new Set();
+    while (type.kind === "Identifier" && aliases.has(type.name) && !seen.has(type.name)) {
+      seen.add(type.name);
+      type = aliases.get(type.name);
+    }
+    if (type.kind === "CallExpression" && type.callee.kind === "Identifier") {
+      const functionType = typeFunctions.get(type.callee.name);
+      if (functionType) {
+        const values = /* @__PURE__ */ new Map();
+        functionType.parameters.forEach((name, index) => {
+          if (type.arguments[index]) values.set(name, type.arguments[index]);
+        });
+        return substitute(functionType.body, values);
+      }
+    }
+    return type;
+  };
+  const typeText = (type) => {
+    switch (type.kind) {
+      case "Identifier":
+      case "NumberExpression":
+      case "QuantExpression":
+      case "StringExpression":
+        return source.slice(type.span.start, type.span.end);
+      case "CallExpression":
+        return `${typeText(type.callee)}(${type.arguments.map(typeText).join(", ")})`;
+      case "TypeApplicationExpression":
+        return `${typeText(type.callee)}<${type.arguments.map(typeText).join(", ")}>`;
+      case "ArrowExpression":
+        return `${typeText(type.domain)} -> ${typeText(type.codomain)}`;
+      case "EqualityExpression":
+        return `${typeText(type.left)} == ${typeText(type.right)}`;
+      case "TypedEqualityExpression":
+        return `{${typeText(type.left)} == ${typeText(type.right)} : ${typeText(type.type)}}`;
+      case "BinaryExpression":
+        return `${typeText(type.left)} ${type.operator} ${typeText(type.right)}`;
+      case "AnnotationExpression":
+        return `${typeText(type.value)} : ${typeText(type.type)}`;
+      default:
+        return source.slice(type.span.start, type.span.end);
+    }
+  };
+  const expressionType = (expression, scope) => {
+    if (expression.kind === "Identifier") return scope.get(expression.name);
+    if (expression.kind === "AnnotationExpression") return expression.type;
+    if (expression.kind === "CallExpression" && expression.callee.kind === "Identifier") return scope.get(expression.callee.name);
+    return void 0;
+  };
+  const bindPattern = (pattern, type, scope) => {
+    if (pattern.kind === "NamePattern") {
+      if (pattern.name !== "_" && type) {
+        declarations.set(pattern.span.start, { name: pattern.name, type });
+        scope.set(pattern.name, type);
+      }
+      return;
+    }
+    if (pattern.kind === "LiteralPattern") return;
+    if (pattern.kind === "NatAddPattern") {
+      bindPattern(pattern.rest, type, scope);
+      return;
+    }
+    const actual = type && resolve3(type);
+    if (pattern.constructor === "Tuple" && actual?.kind === "BinaryExpression" && actual.operator === "&") {
+      bindPattern(pattern.fields[0], actual.left, scope);
+      bindPattern(pattern.fields[1], actual.right, scope);
+      for (let index = 2; index < pattern.fields.length; index++) bindPattern(pattern.fields[index], void 0, scope);
+      return;
+    }
+    const constructor = constructors.get(pattern.constructor) ?? constructors.get(pattern.constructor.split(".").at(-1));
+    if (constructor) {
+      const substitutions = /* @__PURE__ */ new Map();
+      if (actual?.kind === "TypeApplicationExpression" && actual.callee.kind === "Identifier" && actual.callee.name === constructor.owner) {
+        constructor.parameters.forEach((name, index) => {
+          if (actual.arguments[index]) substitutions.set(name, actual.arguments[index]);
+        });
+      }
+      pattern.fields.forEach((field, index) => {
+        const declared = constructor.fields[index];
+        const fieldType = declared ? substitute(declared, substitutions) : void 0;
+        bindPattern(field, fieldType, scope);
+      });
+      return;
+    }
+    pattern.fields.forEach((field) => bindPattern(field, void 0, scope));
+  };
+  const visitCase = (item, scrutineeType, outer, depth) => {
+    const scope = new Map(outer);
+    bindPattern(item.pattern, scrutineeType, scope);
+    visitBody(item.body, scope, depth);
+  };
+  const visitExpression = (node, scope, depth) => {
+    switch (node.kind) {
+      case "MatchExpression": {
+        const type = expressionType(node.scrutinee, scope);
+        node.cases.forEach((item) => visitCase(item, type, scope, depth));
+        return;
+      }
+      case "ArrowExpression":
+        visitExpression(node.domain, scope, depth);
+        visitExpression(node.codomain, scope, depth);
+        return;
+      case "EqualityExpression":
+      case "BinaryExpression":
+        visitExpression(node.left, scope, depth);
+        visitExpression(node.right, scope, depth);
+        return;
+      case "TypedEqualityExpression":
+        visitExpression(node.left, scope, depth);
+        visitExpression(node.right, scope, depth);
+        visitExpression(node.type, scope, depth);
+        return;
+      case "AnnotationExpression":
+        visitExpression(node.value, scope, depth);
+        visitExpression(node.type, scope, depth);
+        return;
+      case "CallExpression":
+      case "TypeApplicationExpression":
+      case "ConstructorExpression":
+        visitExpression(node.callee, scope, depth);
+        node.arguments.forEach((item) => visitExpression(item, scope, depth));
+        return;
+      case "TupleExpression":
+        node.fields.forEach((field) => visitExpression(field.type, scope, depth));
+        return;
+      case "UnionExpression":
+        node.variants.forEach((variant) => variant.fields.forEach((field) => visitExpression(field.type, scope, depth)));
+        return;
+      case "ListExpression":
+        node.values.forEach((item) => visitExpression(item, scope, depth));
+        return;
+      case "ArrayExpression":
+        visitExpression(node.value, scope, depth);
+        visitExpression(node.type, scope, depth);
+        visitExpression(node.size, scope, depth);
+        return;
+      case "IndexExpression":
+        visitExpression(node.target, scope, depth);
+        visitExpression(node.index, scope, depth);
+        return;
+      case "ArraySetExpression":
+        visitExpression(node.target, scope, depth);
+        visitExpression(node.index, scope, depth);
+        visitExpression(node.value, scope, depth);
+        return;
+      case "RewriteExpression":
+        visitExpression(node.proof, scope, depth);
+        visitExpression(node.motive, scope, depth);
+        visitExpression(node.value, scope, depth);
+        return;
+      case "DoExpression":
+        visitExpression(node.effect, scope, depth);
+        return;
+      case "PrefixQuantityExpression":
+        visitExpression(node.value, scope, depth);
+        return;
+      case "Identifier":
+      case "NumberExpression":
+      case "QuantExpression":
+      case "StringExpression":
+      case "ReflexivityExpression":
+        return;
+    }
+  };
+  const visitBody = (body, scope, depth) => {
+    if (body.kind === "Block") visitStatements(body.statements, new Map(scope), depth + 1);
+    else visitExpression(body, scope, depth);
+  };
+  const visitDeclaration = (node, outer, depth) => {
+    outer.set(node.name.name, node.returnType);
+    const scope = new Map(outer);
     if (depth > 0 && node.parameters.length === 0 && node.body.kind !== "UnionExpression" && node.body.kind !== "TupleExpression") {
       declarations.set(node.name.span.start, { name: node.name.name, type: node.returnType });
     }
     for (const field of [...node.typeParameters, ...node.parameters]) {
-      if (field.name) declarations.set(field.name.span.start, { name: field.name.name, type: field.type });
+      if (!field.name) continue;
+      declarations.set(field.name.span.start, { name: field.name.name, type: field.type });
+      scope.set(field.name.name, field.type);
     }
-    if (node.body.kind === "Block") visitStatements(node.body.statements, depth + 1);
-    else if (node.body.kind === "MatchExpression") {
-      for (const item of node.body.cases) if (item.body.kind === "Block") visitStatements(item.body.statements, depth + 1);
+    visitBody(node.body, scope, depth);
+  };
+  const visitStatements = (statements, scope, depth) => {
+    for (const statement of statements) {
+      if (statement.kind === "Declaration") visitDeclaration(statement, scope, depth);
+      else if (statement.kind === "PatternDeclaration") {
+        visitExpression(statement.value, scope, depth);
+        bindPattern(statement.pattern, expressionType(statement.value, scope), scope);
+      } else if (statement.kind === "ExpressionStatement") visitExpression(statement.expression, scope, depth);
     }
   };
-  visitStatements(program.statements, 0);
+  visitStatements(program.statements, /* @__PURE__ */ new Map(), 0);
   return flowOccurrences(program).flatMap((occurrence) => {
     const declared = declarations.get(occurrence.definition.start);
     if (!declared) return [];
-    const type = source.slice(declared.type.span.start, declared.type.span.end);
+    const type = typeText(declared.type);
     return [{ start: occurrence.start, end: occurrence.end, value: `\`\`\`bend
 ${declared.name} : ${type}
 \`\`\`` }];
@@ -4311,6 +5084,36 @@ ${name} : ${signature}
   for (const [name, tld] of Object.entries(book.tlds)) add(name, tld.$ === "ADT" ? "type" : "def", tld.T);
   for (const [name, constructor] of Object.entries(book.ctrs)) add(name, "constructor", constructor.T);
   return hovers;
+}
+function renderValuePreviews(book, source) {
+  const result = [];
+  const declarations = source.lowered.program.statements.filter((statement) => statement.kind === "Declaration").sort((left, right) => left.span.start - right.span.start);
+  const markers = /#\?/g;
+  for (let marker = markers.exec(source.text); marker; marker = markers.exec(source.text)) {
+    const lineEnd = source.text.indexOf("\n", marker.index);
+    const end = lineEnd < 0 ? source.text.length : lineEnd;
+    const after = source.text.slice(marker.index + marker[0].length, end);
+    const named = /^\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$/.exec(after);
+    const containing = declarations.filter((declaration) => declaration.span.start <= marker.index).at(-1);
+    const following = declarations.find((declaration) => declaration.span.start > marker.index);
+    const name = named?.[1] ?? containing?.name.name ?? following?.name.name;
+    if (!name) continue;
+    const definition2 = book.tlds[name];
+    if (!definition2 || definition2.$ !== "Def" || definition2.n !== 0 || definition2.v === null || definition2.i !== void 0) continue;
+    try {
+      const type = term_show(term_lower(definition2.T));
+      if (/^IO(?:\b|\()/.test(type)) continue;
+      const value = term_show(term_lower(term_snf(book, definition2.v))).replace(/\s+/g, " ").trim();
+      if (!value) continue;
+      result.push({
+        uri: source.uri,
+        offset: named ? end : marker.index + marker[0].length,
+        value: value.length > 200 ? `${value.slice(0, 197)}...` : value
+      });
+    } catch {
+    }
+  }
+  return result;
 }
 function localFlowImports(program) {
   return program.statements.filter((item) => item.kind === "ImportStatement" && item.path !== "Base");
@@ -4373,6 +5176,7 @@ async function checkFlow(request) {
   let diagnostics = [];
   let hovers = {};
   let typedHovers = [];
+  let valuePreviews = [];
   try {
     const staged = stageProject(request, directory);
     const root = staged.flows.find((item) => key(item.original) === key(request.path));
@@ -4411,12 +5215,13 @@ async function checkFlow(request) {
       }
     }
     hovers = renderHovers(book);
+    if (diagnostics.length === 0 && book.hols === 0) valuePreviews = renderValuePreviews(book, root);
   } catch (error) {
     diagnostics = [{ uri: request.uri, start: 0, end: 1, message: error instanceof Error ? error.message : String(error), code: "lowering" }];
   } finally {
     fs2.rmSync(directory, { recursive: true, force: true });
   }
-  return { id: request.id, uri: request.uri, version: request.version, diagnostics, hovers, typedHovers };
+  return { id: request.id, uri: request.uri, version: request.version, diagnostics, hovers, typedHovers, valuePreviews };
 }
 
 // src/checker-worker.ts
@@ -4429,7 +5234,8 @@ parentPort?.on("message", (request) => {
       version: request.version,
       diagnostics: [{ uri: request.uri, start: 0, end: 1, message: error instanceof Error ? error.message : String(error), code: "lowering" }],
       hovers: {},
-      typedHovers: []
+      typedHovers: [],
+      valuePreviews: []
     });
   });
 });

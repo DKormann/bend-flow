@@ -23,7 +23,7 @@ FR: Type =
 FIN: Type = (x: Nat, h: Nat)
 
 
-SIG: Type = (x: Nat, F(x))
+
 
 example_list: List<Nat> = Con<Nat>{2n, Nil{} }
 
@@ -48,6 +48,9 @@ fn(T: Type, x: T):T = x
 main () : Nat  = 
   res: Nat = fn (Nat, 3n)
   res
+
+
+peep(): Nat = 22n
 
 
 

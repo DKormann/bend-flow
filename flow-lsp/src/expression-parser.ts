@@ -16,7 +16,7 @@ export class FlowParseError extends Error {
   }
 }
 
-type TokenKind = "name" | "number" | "string" | "symbol" | "eof";
+type TokenKind = "name" | "number" | "quantity" | "string" | "symbol" | "eof";
 type Token = { kind: TokenKind; text: string; start: number; end: number };
 
 function tokenize(source: string, base: number): Token[] {
@@ -25,7 +25,10 @@ function tokenize(source: string, base: number): Token[] {
   while (index < source.length) {
     const char = source[index];
     if (/\s/.test(char)) { index++; continue; }
-    if (char === "#") break;
+    if (char === "#") {
+      while (index < source.length && source[index] !== "\n") index++;
+      continue;
+    }
     if (/[A-Za-z_]/.test(char)) {
       const match = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(source.slice(index))!;
       tokens.push({ kind: "name", text: match[0], start: base + index, end: base + index + match[0].length });
@@ -50,13 +53,24 @@ function tokenize(source: string, base: number): Token[] {
       index = end;
       continue;
     }
+    const triple = source.slice(index, index + 3);
+    if (triple === "<&>") {
+      tokens.push({ kind: "symbol", text: triple, start: base + index, end: base + index + 3 });
+      index += 3;
+      continue;
+    }
+    if (char === "&" && /^[012]$/.test(source[index + 1] ?? "")) {
+      tokens.push({ kind: "quantity", text: source.slice(index, index + 2), start: base + index, end: base + index + 2 });
+      index += 2;
+      continue;
+    }
     const pair = source.slice(index, index + 2);
-    if (["->", "==", "=>"].includes(pair)) {
+    if (["->", "==", "=>", "<-", "<>"].includes(pair)) {
       tokens.push({ kind: "symbol", text: pair, start: base + index, end: base + index + 2 });
       index += 2;
       continue;
     }
-    if ("(){}<>,:|+-~".includes(char)) {
+    if ("(){}[]<>,:;|+-~&*^%".includes(char)) {
       tokens.push({ kind: "symbol", text: char, start: base + index, end: base + index + 1 });
       index++;
       continue;
@@ -106,6 +120,19 @@ export class ExpressionParser {
   parseExpression(minimumBindingPower = 0): Expression {
     let left = this.parsePrimary();
     while (true) {
+      if (this.current().text === "[") {
+        const start = left.span.start;
+        this.index++;
+        const index = this.parseExpression();
+        const close = this.expect("]");
+        if (this.take("<-")) {
+          const value = this.parseExpression();
+          left = { kind: "ArraySetExpression", target: left, index, value, span: { start, end: value.span.end } };
+        } else {
+          left = { kind: "IndexExpression", target: left, index, span: { start, end: close.end } };
+        }
+        continue;
+      }
       if (this.current().text === "<") {
         const start = left.span.start;
         const arguments_ = this.parseDelimited("<", ">");
@@ -125,13 +152,22 @@ export class ExpressionParser {
         continue;
       }
       const operator = this.current();
-      const bindingPower = operator.text === "->" ? 1 : operator.text === "==" ? 2 : -1;
+      const bindingPower = operator.text === "->" ? 1
+        : operator.text === "&" ? 2
+        : operator.text === "==" ? 3
+        : operator.text === "<&>" ? 4
+        : operator.text === "<>" ? 5
+        : operator.text === "+" ? 10
+        : -1;
       if (bindingPower < minimumBindingPower) break;
       this.index++;
-      const right = this.parseExpression(operator.text === "->" ? bindingPower : bindingPower + 1);
+      const rightAssociative = operator.text === "->" || operator.text === "&" || operator.text === "<&>" || operator.text === "<>";
+      const right = this.parseExpression(rightAssociative ? bindingPower : bindingPower + 1);
       left = operator.text === "->"
         ? { kind: "ArrowExpression", domain: left, codomain: right, span: { start: left.span.start, end: right.span.end } }
-        : { kind: "EqualityExpression", left, right, span: { start: left.span.start, end: right.span.end } };
+        : operator.text === "=="
+          ? { kind: "EqualityExpression", left, right, span: { start: left.span.start, end: right.span.end } }
+          : { kind: "BinaryExpression", operator: operator.text as "&" | "<&>" | "<>" | "+", left, right, span: { start: left.span.start, end: right.span.end } };
     }
     return left;
   }
@@ -188,6 +224,18 @@ export class ExpressionParser {
 
   private parsePrimary(): Expression {
     const token = this.current();
+    if (["+", "-", "~"].includes(token.text) && this.peek().kind === "name") {
+      this.index++;
+      const value = this.parsePrimary();
+      const quantity: Quantity = token.text === "+" ? "many" : token.text === "-" ? "none" : "comptime";
+      return {
+        kind: "PrefixQuantityExpression",
+        quantity,
+        quantitySpan: { start: token.start, end: token.end },
+        value,
+        span: { start: token.start, end: value.span.end },
+      };
+    }
     if (token.kind === "name") {
       this.index++;
       return { kind: "Identifier", name: token.text, span: { start: token.start, end: token.end } };
@@ -196,11 +244,51 @@ export class ExpressionParser {
       this.index++;
       return { kind: "NumberExpression", value: token.text, span: { start: token.start, end: token.end } };
     }
+    if (token.kind === "quantity") {
+      this.index++;
+      return { kind: "QuantExpression", value: token.text as "&0" | "&1" | "&2", span: { start: token.start, end: token.end } };
+    }
     if (token.kind === "string") {
       this.index++;
       let value: string;
       try { value = JSON.parse(token.text) as string; } catch { value = token.text.slice(1, -1); }
       return { kind: "StringExpression", value, raw: token.text, span: { start: token.start, end: token.end } };
+    }
+    if (this.take("%")) {
+      const open = token;
+      const proof = this.parseExpression();
+      this.expect(":");
+      const motive = this.parseExpression();
+      this.expect(";");
+      const value = this.parseExpression();
+      return { kind: "RewriteExpression", proof, motive, value, span: { start: open.start, end: value.span.end } };
+    }
+    if (this.take("[")) {
+      const open = token;
+      if (this.take("]")) return { kind: "ListExpression", values: [], span: { start: open.start, end: this.tokens[this.index - 1].end } };
+      const first = this.parseExpression();
+      if (this.take(":")) {
+        const type = this.parseExpression();
+        const operator = this.current();
+        if (!this.take("*") && !this.take("^")) throw new FlowParseError("Expected '*' or '^' in an array literal", { start: operator.start, end: operator.end });
+        const size = this.parseExpression();
+        const close = this.expect("]");
+        return {
+          kind: "ArrayExpression",
+          value: first,
+          type,
+          size,
+          mode: operator.text === "*" ? "count" : "depth",
+          span: { start: open.start, end: close.end },
+        };
+      }
+      const values = [first];
+      while (this.take(",")) {
+        if (this.current().text === "]") break;
+        values.push(this.parseExpression());
+      }
+      const close = this.expect("]");
+      return { kind: "ListExpression", values, span: { start: open.start, end: close.end } };
     }
     if (this.take("{")) {
       const open = token;
@@ -253,8 +341,49 @@ export class ExpressionParser {
 }
 
 export function expressionToPattern(expression: Expression): Pattern {
+  if (expression.kind === "PrefixQuantityExpression") {
+    const pattern = expressionToPattern(expression.value);
+    if (pattern.kind !== "NamePattern") throw new FlowParseError("A pattern quantity must modify a binder", expression.span);
+    return { ...pattern, quantity: expression.quantity, quantitySpan: expression.quantitySpan };
+  }
+  if (expression.kind === "NumberExpression" || expression.kind === "StringExpression") {
+    return { kind: "LiteralPattern", raw: expression.kind === "StringExpression" ? expression.raw : expression.value, span: expression.span };
+  }
+  if (expression.kind === "BinaryExpression" && expression.operator === "+"
+    && expression.left.kind === "NumberExpression" && expression.left.value.endsWith("n")) {
+    return {
+      kind: "NatAddPattern",
+      amount: expression.left.value,
+      rest: expressionToPattern(expression.right),
+      span: expression.span,
+    };
+  }
   if (expression.kind === "Identifier") {
     return { kind: "NamePattern", name: expression.name, span: expression.span };
+  }
+  if (expression.kind === "TupleExpression" && expression.fields.length > 1 && expression.fields.every((field) => !field.name)) {
+    const [first, ...rest] = expression.fields;
+    const tail = rest.length === 1 ? rest[0].type : {
+      kind: "TupleExpression" as const,
+      fields: rest,
+      span: { start: rest[0].span.start, end: rest.at(-1)!.span.end },
+    };
+    return {
+      kind: "ConstructorPattern",
+      constructor: "Tuple",
+      typeArguments: [],
+      fields: [expressionToPattern(first.type), expressionToPattern(tail)],
+      span: expression.span,
+    };
+  }
+  if (expression.kind === "BinaryExpression" && expression.operator === "<>") {
+    return {
+      kind: "ConstructorPattern",
+      constructor: "Con",
+      typeArguments: [],
+      fields: [expressionToPattern(expression.left), expressionToPattern(expression.right)],
+      span: expression.span,
+    };
   }
   if (expression.kind === "ConstructorExpression") {
     let callee: Expression = expression.callee;

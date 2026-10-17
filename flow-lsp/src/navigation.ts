@@ -55,6 +55,7 @@ class NavigationBuilder {
         if (statement.alias) this.bind(scope, statement.alias.name, statement.alias.span, "declaration");
         return;
       case "Declaration": this.visitDeclaration(statement, scope); return;
+      case "PatternDeclaration": this.visitExpression(statement.value, scope); this.visitPattern(statement.pattern, scope); return;
       case "ExpressionStatement": this.visitExpression(statement.expression, scope); return;
       case "RawBendDefinition": {
         const declaration = /^\s*(?:@unsafe\s+)?(?:def|law|type)\s+([A-Za-z_][A-Za-z0-9_.]*)/m.exec(statement.source);
@@ -93,9 +94,25 @@ class NavigationBuilder {
   private visitExpression(node: Expression, scope: Scope): void {
     switch (node.kind) {
       case "Identifier": this.reference(scope, node.name, node.span); return;
-      case "NumberExpression": case "StringExpression": return;
-      case "ArrowExpression": this.visitExpression(node.domain, scope); this.visitExpression(node.codomain, scope); return;
-      case "EqualityExpression": this.visitExpression(node.left, scope); this.visitExpression(node.right, scope); return;
+      case "NumberExpression": case "QuantExpression": case "StringExpression": return;
+      case "PrefixQuantityExpression": this.visitExpression(node.value, scope); return;
+      case "ListExpression": node.values.forEach((value) => this.visitExpression(value, scope)); return;
+      case "ArrayExpression": this.visitExpression(node.value, scope); this.visitExpression(node.type, scope); this.visitExpression(node.size, scope); return;
+      case "IndexExpression": this.visitExpression(node.target, scope); this.visitExpression(node.index, scope); return;
+      case "ArraySetExpression": this.visitExpression(node.target, scope); this.visitExpression(node.index, scope); this.visitExpression(node.value, scope); return;
+      case "RewriteExpression": this.visitExpression(node.proof, scope); this.visitExpression(node.motive, scope); this.visitExpression(node.value, scope); return;
+      case "ArrowExpression": {
+        if (node.domain.kind === "TupleExpression" && node.domain.fields.length > 0 && node.domain.fields.every((field) => field.name)) {
+          const arrowScope = childScope(scope);
+          this.visitFields(node.domain.fields, arrowScope, true);
+          this.visitExpression(node.codomain, arrowScope);
+        } else {
+          this.visitExpression(node.domain, scope);
+          this.visitExpression(node.codomain, scope);
+        }
+        return;
+      }
+      case "EqualityExpression": case "BinaryExpression": this.visitExpression(node.left, scope); this.visitExpression(node.right, scope); return;
       case "TypedEqualityExpression": this.visitExpression(node.left, scope); this.visitExpression(node.right, scope); this.visitExpression(node.type, scope); return;
       case "AnnotationExpression": this.visitExpression(node.value, scope); this.visitExpression(node.type, scope); return;
       case "ReflexivityExpression": return;
@@ -154,7 +171,8 @@ class NavigationBuilder {
       node.fields.forEach((field) => this.visitPattern(field, scope));
       return;
     }
-    if (node.name === "_") return;
+    if (node.kind === "NatAddPattern") { this.visitPattern(node.rest, scope); return; }
+    if (node.kind === "LiteralPattern" || node.name === "_") return;
     const existing = scope.get(node.name);
     if (existing?.kind === "constructor") this.reference(scope, node.name, node.span);
     else this.bind(scope, node.name, node.span, "binding");

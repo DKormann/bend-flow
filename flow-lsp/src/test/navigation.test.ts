@@ -125,6 +125,16 @@ test("navigates through hash hub imports", () => {
   }
 });
 
+test("navigates from dependent function results to their parameter", () => {
+  const source = `DB<i: Index>: Type =\n  | mk {get: (k: String) -> i(k)}\n`;
+  const kDefinition = at(source, "k:");
+  const kUse = at(source, "i(k)") + 2;
+  assert.deepEqual(flowDefinitionAt(source, kUse), { start: kDefinition, end: kDefinition + 1 });
+  const iDefinition = at(source, "i:");
+  const iUse = at(source, "i(k)");
+  assert.deepEqual(flowDefinitionAt(source, iUse), { start: iDefinition, end: iDefinition + 1 });
+});
+
 test("navigates inside dependent fields", () => {
   const source = `MyProp<n: Nat>: Type =\n  | eq{k: Nat, k == n}\n`;
   const kDefinition = at(source, "k:");

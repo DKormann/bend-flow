@@ -7,8 +7,8 @@
     "vscode-extension"
   ],
   "scripts": {
-    "build": "npm run build -w bend-lsp && npm run build -w flow-lsp && npm run build -w bend-flow-vscode",
+    "build": "npm run build -w bend-lsp && npm run build -w flow-lsp && npm run build -w bend-2",
     "test": "npm run test -w bend-lsp && npm run test -w flow-lsp",
-    "package:vscode": "npm run build && npm run package -w bend-flow-vscode"
+    "package:vscode": "npm run build && npm run package -w bend-2"
   }
 }

@@ -25,6 +25,14 @@ export type NumberExpression = { kind: "NumberExpression"; value: string; span: 
 export type StringExpression = { kind: "StringExpression"; value: string; raw: string; span: Span };
 export type ArrowExpression = { kind: "ArrowExpression"; domain: Expression; codomain: Expression; span: Span };
 export type EqualityExpression = { kind: "EqualityExpression"; left: Expression; right: Expression; span: Span };
+export type BinaryExpression = { kind: "BinaryExpression"; operator: "&" | "<&>" | "<>" | "+"; left: Expression; right: Expression; span: Span };
+export type QuantExpression = { kind: "QuantExpression"; value: "&0" | "&1" | "&2"; span: Span };
+export type PrefixQuantityExpression = { kind: "PrefixQuantityExpression"; quantity: Quantity; quantitySpan: Span; value: Expression; span: Span };
+export type ListExpression = { kind: "ListExpression"; values: Expression[]; span: Span };
+export type ArrayExpression = { kind: "ArrayExpression"; value: Expression; type: Expression; size: Expression; mode: "count" | "depth"; span: Span };
+export type IndexExpression = { kind: "IndexExpression"; target: Expression; index: Expression; span: Span };
+export type ArraySetExpression = { kind: "ArraySetExpression"; target: Expression; index: Expression; value: Expression; span: Span };
+export type RewriteExpression = { kind: "RewriteExpression"; proof: Expression; motive: Expression; value: Expression; span: Span };
 export type TypedEqualityExpression = { kind: "TypedEqualityExpression"; left: Expression; right: Expression; type: Expression; span: Span };
 export type ReflexivityExpression = { kind: "ReflexivityExpression"; span: Span };
 export type AnnotationExpression = { kind: "AnnotationExpression"; value: Expression; type: Expression; span: Span };
@@ -43,6 +51,14 @@ export type Expression =
   | StringExpression
   | ArrowExpression
   | EqualityExpression
+  | BinaryExpression
+  | QuantExpression
+  | PrefixQuantityExpression
+  | ListExpression
+  | ArrayExpression
+  | IndexExpression
+  | ArraySetExpression
+  | RewriteExpression
   | TypedEqualityExpression
   | ReflexivityExpression
   | AnnotationExpression
@@ -54,7 +70,7 @@ export type Expression =
   | MatchExpression
   | DoExpression;
 
-export type NamePattern = { kind: "NamePattern"; name: string; span: Span };
+export type NamePattern = { kind: "NamePattern"; name: string; quantity?: Quantity; quantitySpan?: Span; span: Span };
 export type ConstructorPattern = {
   kind: "ConstructorPattern";
   constructor: string;
@@ -62,7 +78,9 @@ export type ConstructorPattern = {
   fields: Pattern[];
   span: Span;
 };
-export type Pattern = NamePattern | ConstructorPattern;
+export type LiteralPattern = { kind: "LiteralPattern"; raw: string; span: Span };
+export type NatAddPattern = { kind: "NatAddPattern"; amount: string; rest: Pattern; span: Span };
+export type Pattern = NamePattern | ConstructorPattern | LiteralPattern | NatAddPattern;
 
 export type MatchCase = {
   kind: "MatchCase";
@@ -103,6 +121,13 @@ export type ExpressionStatement = {
   span: Span;
 };
 
-export type Statement = ImportStatement | Declaration | RawBendDefinition | ExpressionStatement;
+export type PatternDeclaration = {
+  kind: "PatternDeclaration";
+  pattern: Pattern;
+  value: Expression;
+  span: Span;
+};
+
+export type Statement = ImportStatement | Declaration | RawBendDefinition | ExpressionStatement | PatternDeclaration;
 export type Block = { kind: "Block"; statements: Statement[]; span: Span };
 export type Program = { kind: "Program"; statements: Statement[]; span: Span };

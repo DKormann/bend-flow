@@ -1,4 +1,4 @@
-import type { Block, Declaration, Expression, Field, MatchCase, Pattern, Program, Quantity, Span, Statement, UnionExpression } from "./ast.js";
+import type { Block, Declaration, Expression, Field, MatchCase, MatchExpression, Pattern, Program, Quantity, Span, Statement, UnionExpression } from "./ast.js";
 import { parseFlow } from "./parser.js";
 
 export type FlowSourceMapping = {
@@ -9,8 +9,8 @@ export type FlowSourceMapping = {
 };
 
 export type LoweredFlow = { bend: string; mappings: FlowSourceMapping[]; program: Program };
-type SymbolKind = "type" | "function" | "value" | "constructor" | "binding";
-type Symbol = { kind: SymbolKind; target: string; span: Span; type?: Expression; owner?: string; quantity?: Quantity };
+type SymbolKind = "type" | "function" | "value" | "constructor" | "binding" | "local";
+type Symbol = { kind: SymbolKind; target: string; span: Span; type?: Expression; owner?: string; quantity?: Quantity; fieldTypes?: Expression[] };
 type Scope = Map<string, Symbol>;
 type Snippet = { text: string; mappings: FlowSourceMapping[] };
 
@@ -40,12 +40,18 @@ function indent(text: string, spaces = 2): string {
   return text.split("\n").map((line) => line ? prefix + line : line).join("\n");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class FlowLowerer {
   private readonly imports: Snippet[] = [];
-  private readonly hoisted: Snippet[] = [];
   private readonly regular: Snippet[] = [];
   private readonly global: Scope = new Map();
   private hasBaseImport = false;
+  private nextMatchHelper = 0;
+  private readonly expectedTypes: string[] = [];
+  private readonly expectedTypeNodes: Expression[] = [];
 
   constructor(private readonly program: Program) {}
 
@@ -55,7 +61,7 @@ export class FlowLowerer {
     if (this.hasBaseImport) output.line("import Base");
     for (const imported of this.imports) append(output, imported);
     if (this.hasBaseImport || this.imports.length) output.line();
-    for (const snippet of [...this.hoisted, ...this.regular]) {
+    for (const snippet of this.regular) {
       append(output, snippet);
       if (!output.text.endsWith("\n\n")) output.line();
     }
@@ -88,6 +94,7 @@ export class FlowLowerer {
       this.lowerDeclaration(statement, statement.name.name, this.global, false);
       return;
     }
+    if (statement.kind === "PatternDeclaration") throw new Error("Flow destructuring declarations must be inside a definition");
     const type = this.expressionType(statement.expression, this.global) ?? "Type";
     const writer = new Writer();
     writer.line(`def main() -> ${type}:`, statement.span);
@@ -96,7 +103,9 @@ export class FlowLowerer {
   }
 
   private lowerDeclaration(node: Declaration, target: string, outer: Scope, nested: boolean): void {
-    const typeDeclaration = node.body.kind === "UnionExpression" || node.body.kind === "TupleExpression";
+    const returnsKind = node.returnType.kind === "Identifier" && (node.returnType.name === "Type" || node.returnType.name === "Data")
+      || node.returnType.kind === "CallExpression" && node.returnType.callee.kind === "Identifier" && node.returnType.callee.name === "Kind";
+    const typeDeclaration = returnsKind && (node.body.kind === "UnionExpression" || node.body.kind === "TupleExpression");
     const kind: SymbolKind = typeDeclaration ? "type" : node.parameters.length ? "function" : "value";
     outer.set(node.name.name, { kind, target, span: node.name.span, type: node.returnType });
     const scope = new Map(outer);
@@ -105,7 +114,7 @@ export class FlowLowerer {
     const snippet = typeDeclaration
       ? this.lowerTypeDeclaration(node, target, scope, outer)
       : this.lowerValueDeclaration(node, target, scope);
-    (nested ? this.hoisted : this.regular).push(snippet);
+    this.regular.push(snippet);
   }
 
   private lowerTypeDeclaration(node: Declaration, target: string, scope: Scope, outer: Scope): Snippet {
@@ -116,8 +125,9 @@ export class FlowLowerer {
     if (node.body.kind === "UnionExpression") {
       for (const variant of node.body.variants) {
         const constructor = target.includes(".") ? `${target}.${variant.name.name}` : variant.name.name;
-        outer.set(variant.name.name, { kind: "constructor", target: constructor, owner: target, span: variant.name.span });
-        scope.set(variant.name.name, { kind: "constructor", target: constructor, owner: target, span: variant.name.span });
+        const constructorSymbol: Symbol = { kind: "constructor", target: constructor, owner: target, span: variant.name.span, fieldTypes: variant.fields.map((field) => field.type) };
+        outer.set(variant.name.name, constructorSymbol);
+        scope.set(variant.name.name, constructorSymbol);
         writer.write("  "); writer.write(constructor, variant.name.span); writer.write("{");
         const fieldScope = new Map(scope);
         variant.fields.forEach((field, index) => {
@@ -155,17 +165,18 @@ export class FlowLowerer {
       writer.write(this.renderType(field.type, scope), field.type.span);
     });
     writer.write(") -> "); writer.write(this.renderType(node.returnType, scope), node.returnType.span); writer.line(":");
+    const expectedType = this.renderType(node.returnType, scope);
     if (node.body.kind === "Block") {
-      const body = this.renderBlock(node.body, scope, target);
+      const body = this.renderBlock(node.body, scope, target, expectedType, node.returnType);
       writer.write(indent(body.text), node.body.span);
       if (!writer.text.endsWith("\n")) writer.line();
     } else {
-      writer.line("  " + this.renderExpression(node.body, scope), node.body.span);
+      writer.line("  " + this.renderExpected(node.body, scope, expectedType, node.returnType), node.body.span);
     }
     return { text: writer.text, mappings: writer.mappings };
   }
 
-  private renderBlock(block: Block, parent: Scope, owner: string): Snippet {
+  private renderBlock(block: Block, parent: Scope, owner: string, expectedType?: string, expectedTypeNode?: Expression): Snippet {
     const writer = new Writer();
     const scope = new Map(parent);
     for (const statement of block.statements) {
@@ -174,20 +185,28 @@ export class FlowLowerer {
       } else if (statement.kind === "RawBendDefinition") {
         writer.line(statement.source, statement.span);
       } else if (statement.kind === "ExpressionStatement") {
-        writer.line(this.renderExpression(statement.expression, scope), statement.span);
+        const isLast = statement === block.statements.at(-1);
+        writer.line(isLast && expectedType
+          ? this.renderExpected(statement.expression, scope, expectedType, expectedTypeNode)
+          : this.renderExpression(statement.expression, scope), statement.span);
+      } else if (statement.kind === "PatternDeclaration") {
+        const valueType = this.expressionTypeNode(statement.value, scope);
+        const value = this.renderExpression(statement.value, scope);
+        const pattern = this.renderPattern(statement.pattern, scope, valueType);
+        writer.line(`${pattern} = ${value}`, statement.span);
       } else {
         const needsLift = statement.parameters.length > 0 || statement.body.kind === "UnionExpression" || statement.body.kind === "TupleExpression";
         if (needsLift) {
           const target = `${owner}.${statement.name.name}`;
           this.lowerDeclaration(statement, target, scope, true);
         } else {
-          scope.set(statement.name.name, { kind: "binding", target: statement.name.name, span: statement.name.span, type: statement.returnType, quantity: statement.quantity });
+          scope.set(statement.name.name, { kind: "local", target: statement.name.name, span: statement.name.span, type: statement.returnType, quantity: statement.quantity });
           writer.write(this.quantityMarker(statement.quantity), statement.quantitySpan); writer.write(statement.name.name, statement.name.span); writer.write(": ");
           writer.write(this.renderType(statement.returnType, scope), statement.returnType.span); writer.write(" = ");
           if (statement.body.kind === "Block") {
             const helper = `${owner}.${statement.name.name}`;
             const free = this.freeBlockNames(statement.body);
-            const captures = [...scope.entries()].filter(([name, symbol]) => name !== statement.name.name && free.has(name) && symbol.kind === "binding" && symbol.type);
+            const captures = [...scope.entries()].filter(([name, symbol]) => name !== statement.name.name && free.has(name) && (symbol.kind === "binding" || symbol.kind === "local") && symbol.type);
             const lifted = new Writer();
             lifted.write("def "); lifted.write(helper, statement.name.span); lifted.write("(");
             captures.forEach(([name, symbol], index) => {
@@ -196,18 +215,27 @@ export class FlowLowerer {
               lifted.write(this.renderType(symbol.type as Expression, scope), symbol.type?.span);
             });
             lifted.write(") -> "); lifted.write(this.renderType(statement.returnType, scope), statement.returnType.span); lifted.line(":");
-            const nested = this.renderBlock(statement.body, scope, helper);
+            const nested = this.renderBlock(statement.body, scope, helper, this.renderType(statement.returnType, scope), statement.returnType);
             lifted.write(indent(nested.text), statement.body.span);
             if (!lifted.text.endsWith("\n")) lifted.line();
-            this.hoisted.push({ text: lifted.text, mappings: lifted.mappings });
+            this.regular.push({ text: lifted.text, mappings: lifted.mappings });
             writer.line(`${helper}(${captures.map(([name]) => name).join(", ")})`, statement.body.span);
           } else {
-            writer.line(this.renderExpression(statement.body, scope), statement.body.span);
+            writer.line(this.renderExpected(statement.body, scope, this.renderType(statement.returnType, scope), statement.returnType), statement.body.span);
           }
         }
       }
     }
     return { text: writer.text, mappings: writer.mappings };
+  }
+
+  private renderExpected(node: Expression, scope: Scope, type: string, typeNode?: Expression): string {
+    this.expectedTypes.push(type);
+    if (typeNode) this.expectedTypeNodes.push(typeNode);
+    try { return this.renderExpression(node, scope); } finally {
+      this.expectedTypes.pop();
+      if (typeNode) this.expectedTypeNodes.pop();
+    }
   }
 
   private renderExpression(node: Expression, scope: Scope): string {
@@ -220,12 +248,28 @@ export class FlowLowerer {
         return symbol.target;
       }
       case "NumberExpression": return node.value;
+      case "QuantExpression": return node.value;
+      case "PrefixQuantityExpression": return `${this.quantityMarker(node.quantity)}${this.renderExpression(node.value, scope)}`;
       case "StringExpression": return node.raw;
-      case "ArrowExpression": return `${this.renderExpression(node.domain, scope)} -> ${this.renderExpression(node.codomain, scope)}`;
+      case "ListExpression": return `[${node.values.map((value) => this.renderExpression(value, scope)).join(", ")}]`;
+      case "ArrayExpression": return `[${this.renderExpression(node.value, scope)} : ${this.renderType(node.type, scope)}${node.mode === "count" ? "*" : "^"}${this.renderExpression(node.size, scope)}]`;
+      case "IndexExpression": return `${this.renderExpression(node.target, scope)}[${this.renderExpression(node.index, scope)}]`;
+      case "ArraySetExpression": return `${this.renderExpression(node.target, scope)}[${this.renderExpression(node.index, scope)}] <- ${this.renderExpression(node.value, scope)}`;
+      case "RewriteExpression": return `%${this.renderExpression(node.proof, scope)} : ${this.renderExpression(node.motive, scope)}; ${this.renderExpression(node.value, scope)}`;
+      case "ArrowExpression": {
+        if (node.domain.kind === "TupleExpression" && node.domain.fields.length > 0 && node.domain.fields.every((field) => field.name)) {
+          const binders = node.domain.fields.map((field) =>
+            `@${this.quantityMarker(field.quantity)}${field.name!.name}: ${this.renderType(field.type, scope)} -> `
+          ).join("");
+          return binders + this.renderExpression(node.codomain, scope);
+        }
+        return `${this.renderExpression(node.domain, scope)} -> ${this.renderExpression(node.codomain, scope)}`;
+      }
       case "EqualityExpression": {
         const type = this.inferEqualityType(node.left, node.right, scope);
         return `{${this.renderExpression(node.left, scope)} == ${this.renderExpression(node.right, scope)} : ${type}}`;
       }
+      case "BinaryExpression": return `${this.renderExpression(node.left, scope)} ${node.operator} ${this.renderExpression(node.right, scope)}`;
       case "TypedEqualityExpression": return `{${this.renderExpression(node.left, scope)} == ${this.renderExpression(node.right, scope)} : ${this.renderType(node.type, scope)}}`;
       case "ReflexivityExpression": return "{==}";
       case "AnnotationExpression": return `{${this.renderExpression(node.value, scope)} : ${this.renderType(node.type, scope)}}`;
@@ -249,33 +293,84 @@ export class FlowLowerer {
       case "TupleExpression": return `(${node.fields.map((field) => this.renderType(field.type, scope)).join(", ")})`;
       case "UnionExpression": throw new Error("An inline union must be lifted before expression rendering");
       case "MatchExpression": {
-        const lines = [`match ${this.renderExpression(node.scrutinee, scope)}:`];
-        for (const item of node.cases) lines.push(...this.renderCase(item, scope).split("\n").map((line) => "  " + line));
-        return lines.join("\n");
+        const symbol = node.scrutinee.kind === "Identifier" ? scope.get(node.scrutinee.name) : undefined;
+        if (node.scrutinee.kind === "Identifier" && symbol?.kind === "binding") {
+          return this.renderMatch(node, scope);
+        }
+
+        // Bend only permits a parameter or constructor field as a match
+        // scrutinee. Lift a computed scrutinee into a helper parameter so Flow
+        // can accept calls, constructors, annotations, and other expressions.
+        const scrutineeType = this.expressionType(node.scrutinee, scope);
+        const resultType = this.expectedTypes.at(-1) ?? this.matchResultType(node, scope) ?? null;
+        if (!scrutineeType || !resultType) return this.renderMatch(node, scope);
+
+        const id = this.nextMatchHelper++;
+        const helper = `__flow_match_${id}`;
+        const value = `__flow_match_value_${id}`;
+        const free = this.freeMatchNames(node);
+        const typeNames = `${scrutineeType} ${resultType}`;
+        const captures = [...scope.entries()].filter(([name, item]) =>
+          (item.kind === "binding" || item.kind === "local") && item.type
+          && (free.has(name) || new RegExp(`\\b${escapeRegExp(name)}\\b`).test(typeNames))
+        );
+        const helperScope: Scope = new Map([...scope].filter(([, item]) => item.kind !== "binding" && item.kind !== "local"));
+        helperScope.set(value, { kind: "binding", target: value, span: node.scrutinee.span });
+        for (const [name, item] of captures) helperScope.set(name, item);
+
+        const writer = new Writer();
+        writer.write(`def ${helper}(`);
+        for (const [name, item] of captures) {
+          writer.write(`${this.quantityMarker(item.quantity ?? "lone")}${name}: ${this.renderType(item.type!, scope)}, `);
+        }
+        writer.write(`${value}: ${scrutineeType}`);
+        writer.line(`) -> ${resultType}:`);
+        const lifted: MatchExpression = {
+          ...node,
+          scrutinee: { kind: "Identifier", name: value, span: node.scrutinee.span },
+        };
+        writer.write(indent(this.renderMatch(lifted, helperScope)), node.span);
+        writer.line();
+        this.regular.push({ text: writer.text, mappings: writer.mappings });
+
+        const arguments_ = [...captures.map(([, item]) => item.target), this.renderExpression(node.scrutinee, scope)];
+        return `${helper}(${arguments_.join(", ")})`;
       }
       case "DoExpression":
         return [`do ${this.renderExpression(node.effect, scope)}:`, ...node.statements.map((statement) => "  " + statement.source)].join("\n");
     }
   }
 
-  private renderCase(item: MatchCase, parent: Scope): string {
+  private renderMatch(node: MatchExpression, scope: Scope): string {
+    const lines = [`match ${this.renderExpression(node.scrutinee, scope)}:`];
+    const scrutineeType = this.expressionTypeNode(node.scrutinee, scope);
+    for (const item of node.cases) lines.push(...this.renderCase(item, scope, scrutineeType).split("\n").map((line) => "  " + line));
+    return lines.join("\n");
+  }
+
+  private renderCase(item: MatchCase, parent: Scope, scrutineeType?: Expression): string {
     const scope = new Map(parent);
-    const pattern = this.renderPattern(item.pattern, scope);
+    const pattern = this.renderPattern(item.pattern, scope, scrutineeType);
     const body = item.body.kind === "Block" ? this.renderBlock(item.body, scope, "case").text : this.renderExpression(item.body, scope);
     return `case ${pattern}:\n${indent(body)}`;
   }
 
-  private renderPattern(node: Pattern, scope: Scope): string {
+  private renderPattern(node: Pattern, scope: Scope, type?: Expression): string {
     if (node.kind === "NamePattern") {
       if (node.name === "_") return "_";
       const symbol = scope.get(node.name);
       if (symbol?.kind === "constructor") return `${symbol.target}{}`;
-      scope.set(node.name, { kind: "binding", target: node.name, span: node.span });
-      return node.name;
+      scope.set(node.name, { kind: "binding", target: node.name, span: node.span, type, quantity: node.quantity });
+      return `${this.quantityMarker(node.quantity ?? "lone")}${node.name}`;
     }
+    if (node.kind === "LiteralPattern") return node.raw;
+    if (node.kind === "NatAddPattern") return `${node.amount}+${this.renderPattern(node.rest, scope, type)}`;
     const symbol = scope.get(node.constructor);
     const constructor = symbol?.kind === "constructor" ? symbol.target : node.constructor;
-    return `${constructor}{${node.fields.map((field) => this.renderPattern(field, scope)).join(", ")}}`;
+    const fieldTypes = node.constructor === "Tuple" && type?.kind === "BinaryExpression" && type.operator === "&"
+      ? [type.left, type.right]
+      : symbol?.fieldTypes ?? [];
+    return `${constructor}{${node.fields.map((field, index) => this.renderPattern(field, scope, fieldTypes[index])).join(", ")}}`;
   }
 
   private renderType(node: Expression, scope: Scope): string {
@@ -292,9 +387,15 @@ export class FlowLowerer {
     const visit = (node: Expression, bound = new Set<string>()): void => {
       switch (node.kind) {
         case "Identifier": if (!bound.has(node.name)) names.add(node.name); return;
-        case "NumberExpression": case "StringExpression": return;
+        case "NumberExpression": case "QuantExpression": case "StringExpression": return;
+        case "PrefixQuantityExpression": visit(node.value, bound); return;
+        case "ListExpression": node.values.forEach((value) => visit(value, bound)); return;
+        case "ArrayExpression": visit(node.value, bound); visit(node.type, bound); visit(node.size, bound); return;
+        case "IndexExpression": visit(node.target, bound); visit(node.index, bound); return;
+        case "ArraySetExpression": visit(node.target, bound); visit(node.index, bound); visit(node.value, bound); return;
+        case "RewriteExpression": visit(node.proof, bound); visit(node.motive, bound); visit(node.value, bound); return;
         case "ArrowExpression": visit(node.domain, bound); visit(node.codomain, bound); return;
-        case "EqualityExpression": visit(node.left, bound); visit(node.right, bound); return;
+        case "EqualityExpression": case "BinaryExpression": visit(node.left, bound); visit(node.right, bound); return;
         case "TypedEqualityExpression": visit(node.left, bound); visit(node.right, bound); visit(node.type, bound); return;
         case "AnnotationExpression": visit(node.value, bound); visit(node.type, bound); return;
         case "ReflexivityExpression": return;
@@ -308,7 +409,8 @@ export class FlowLowerer {
             const inner = new Set(bound);
             const bindPattern = (pattern: Pattern): void => {
               if (pattern.kind === "NamePattern") { if (pattern.name !== "_") inner.add(pattern.name); }
-              else pattern.fields.forEach(bindPattern);
+              else if (pattern.kind === "ConstructorPattern") pattern.fields.forEach(bindPattern);
+              else if (pattern.kind === "NatAddPattern") bindPattern(pattern.rest);
             };
             bindPattern(item.pattern);
             if (item.body.kind === "Block") visitBlock(item.body, inner); else visit(item.body, inner);
@@ -326,7 +428,15 @@ export class FlowLowerer {
       const bound = new Set(inherited);
       for (const statement of value.statements) {
         if (statement.kind === "ExpressionStatement") visit(statement.expression, bound);
-        else if (statement.kind === "Declaration") {
+        else if (statement.kind === "PatternDeclaration") {
+          visit(statement.value, bound);
+          const bind = (pattern: Pattern): void => {
+            if (pattern.kind === "NamePattern") { if (pattern.name !== "_") bound.add(pattern.name); }
+            else if (pattern.kind === "ConstructorPattern") pattern.fields.forEach(bind);
+            else if (pattern.kind === "NatAddPattern") bind(pattern.rest);
+          };
+          bind(statement.pattern);
+        } else if (statement.kind === "Declaration") {
           statement.typeParameters.forEach((field) => visit(field.type, bound));
           statement.parameters.forEach((field) => visit(field.type, bound));
           visit(statement.returnType, bound);
@@ -337,6 +447,91 @@ export class FlowLowerer {
     };
     visitBlock(block);
     return names;
+  }
+
+  private freeMatchNames(node: MatchExpression): Set<string> {
+    const names = new Set<string>();
+    const visit = (expression: Expression, bound: Set<string>): void => {
+      switch (expression.kind) {
+        case "Identifier": if (!bound.has(expression.name)) names.add(expression.name); return;
+        case "NumberExpression": case "QuantExpression": case "StringExpression": case "ReflexivityExpression": return;
+        case "PrefixQuantityExpression": visit(expression.value, bound); return;
+        case "ListExpression": expression.values.forEach((value) => visit(value, bound)); return;
+        case "ArrayExpression": visit(expression.value, bound); visit(expression.type, bound); visit(expression.size, bound); return;
+        case "IndexExpression": visit(expression.target, bound); visit(expression.index, bound); return;
+        case "ArraySetExpression": visit(expression.target, bound); visit(expression.index, bound); visit(expression.value, bound); return;
+        case "RewriteExpression": visit(expression.proof, bound); visit(expression.motive, bound); visit(expression.value, bound); return;
+        case "ArrowExpression": visit(expression.domain, bound); visit(expression.codomain, bound); return;
+        case "EqualityExpression": case "BinaryExpression": visit(expression.left, bound); visit(expression.right, bound); return;
+        case "TypedEqualityExpression": visit(expression.left, bound); visit(expression.right, bound); visit(expression.type, bound); return;
+        case "AnnotationExpression": visit(expression.value, bound); visit(expression.type, bound); return;
+        case "CallExpression": case "TypeApplicationExpression": case "ConstructorExpression":
+          visit(expression.callee, bound); expression.arguments.forEach((item) => visit(item, bound)); return;
+        case "TupleExpression": expression.fields.forEach((field) => visit(field.type, bound)); return;
+        case "UnionExpression": expression.variants.forEach((variant) => variant.fields.forEach((field) => visit(field.type, bound))); return;
+        case "MatchExpression":
+          visit(expression.scrutinee, bound);
+          for (const item of expression.cases) visitCase(item, bound);
+          return;
+        case "DoExpression":
+          visit(expression.effect, bound);
+          for (const statement of expression.statements) {
+            for (const match of statement.source.matchAll(/[A-Za-z_][A-Za-z0-9_.]*/g)) if (!bound.has(match[0])) names.add(match[0]);
+          }
+          return;
+      }
+    };
+    const bindPattern = (pattern: Pattern, bound: Set<string>): void => {
+      if (pattern.kind === "NamePattern") { if (pattern.name !== "_") bound.add(pattern.name); }
+      else if (pattern.kind === "ConstructorPattern") pattern.fields.forEach((field) => bindPattern(field, bound));
+      else if (pattern.kind === "NatAddPattern") bindPattern(pattern.rest, bound);
+    };
+    const visitBlock = (block: Block, inherited: Set<string>): void => {
+      const bound = new Set(inherited);
+      for (const statement of block.statements) {
+        if (statement.kind === "ExpressionStatement") {
+          visit(statement.expression, bound);
+        } else if (statement.kind === "PatternDeclaration") {
+          visit(statement.value, bound);
+          bindPattern(statement.pattern, bound);
+        } else if (statement.kind === "Declaration") {
+          statement.typeParameters.forEach((field) => visit(field.type, bound));
+          statement.parameters.forEach((field) => visit(field.type, bound));
+          visit(statement.returnType, bound);
+          const bodyBound = new Set(bound).add(statement.name.name);
+          if (statement.body.kind === "Block") visitBlock(statement.body, bodyBound);
+          else visit(statement.body, bodyBound);
+          bound.add(statement.name.name);
+        }
+      }
+    };
+    const visitCase = (item: MatchCase, inherited: Set<string>): void => {
+      const bound = new Set(inherited);
+      bindPattern(item.pattern, bound);
+      if (item.body.kind === "Block") visitBlock(item.body, bound);
+      else visit(item.body, bound);
+    };
+    for (const item of node.cases) visitCase(item, new Set());
+    return names;
+  }
+
+  private matchResultType(node: MatchExpression, scope: Scope): string | null {
+    for (const item of node.cases) {
+      const body = item.body;
+      if (body.kind !== "Block") {
+        const type = this.expressionType(body, scope);
+        if (type) return type;
+        continue;
+      }
+      const last = body.statements.at(-1);
+      if (last?.kind === "ExpressionStatement") {
+        const type = this.expressionType(last.expression, scope);
+        if (type) return type;
+      } else if (last?.kind === "Declaration") {
+        return this.renderType(last.returnType, scope);
+      }
+    }
+    return null;
   }
 
   private quantityMarker(quantity: Field["quantity"] | Declaration["quantity"]): string {
@@ -359,13 +554,53 @@ export class FlowLowerer {
     return "Type";
   }
 
+  private expressionTypeNode(node: Expression, scope: Scope): Expression | undefined {
+    if (node.kind === "Identifier") return scope.get(node.name)?.type;
+    if (node.kind === "AnnotationExpression") return node.type;
+    if (node.kind === "RewriteExpression" || node.kind === "PrefixQuantityExpression") return this.expressionTypeNode(node.value, scope);
+    if (node.kind === "CallExpression") {
+      let callee = node.callee;
+      if (callee.kind === "TypeApplicationExpression") callee = callee.callee;
+      if (callee.kind === "Identifier") return scope.get(callee.name)?.type;
+    }
+    return undefined;
+  }
+
   private expressionType(node: Expression, scope: Scope): string | null {
     if (node.kind === "Identifier") {
       const type = scope.get(node.name)?.type;
       return type ? this.renderType(type, scope) : null;
     }
     if (node.kind === "StringExpression") return "String";
+    if (node.kind === "QuantExpression") return "Quant";
+    if (node.kind === "PrefixQuantityExpression") return this.expressionType(node.value, scope);
+    if (node.kind === "ArrayExpression") return `Array<${this.renderType(node.type, scope)}>`;
+    if (node.kind === "IndexExpression") return "U32";
+    if (node.kind === "ArraySetExpression") return this.expressionType(node.target, scope);
+    if (node.kind === "RewriteExpression") return this.expressionType(node.value, scope);
     if (node.kind === "NumberExpression") return node.value.endsWith("n") ? "Nat" : node.value.includes(".") ? "F32" : "U32";
+    if (node.kind === "AnnotationExpression") return this.renderType(node.type, scope);
+    if (node.kind === "CallExpression") {
+      let callee = node.callee;
+      if (callee.kind === "TypeApplicationExpression") callee = callee.callee;
+      if (callee.kind === "Identifier") {
+        const type = scope.get(callee.name)?.type;
+        return type ? this.renderType(type, scope) : null;
+      }
+      return null;
+    }
+    if (node.kind === "ConstructorExpression") {
+      let callee = node.callee;
+      let arguments_: Expression[] = [];
+      if (callee.kind === "TypeApplicationExpression") {
+        arguments_ = callee.arguments;
+        callee = callee.callee;
+      }
+      if (callee.kind !== "Identifier") return null;
+      const owner = scope.get(callee.name)?.owner;
+      return owner ? `${owner}${arguments_.length ? `<${arguments_.map((item) => this.renderType(item, scope)).join(", ")}>` : ""}` : null;
+    }
+    if (node.kind === "MatchExpression") return this.matchResultType(node, scope);
     return null;
   }
 }

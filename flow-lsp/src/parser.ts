@@ -9,6 +9,7 @@ import type {
   ImportStatement,
   MatchCase,
   MatchExpression,
+  PatternDeclaration,
   Program,
   Quantity,
   RawBendDefinition,
@@ -51,6 +52,7 @@ function topLevelIndex(source: string, wanted: string): number {
   let round = 0;
   let curly = 0;
   let angle = 0;
+  let square = 0;
   let string = false;
   for (let index = 0; index < source.length; index++) {
     const char = source[index];
@@ -64,9 +66,11 @@ function topLevelIndex(source: string, wanted: string): number {
     else if (char === ")") round--;
     else if (char === "{") curly++;
     else if (char === "}") curly--;
-    else if (char === "<") angle++;
+    else if (char === "<" && source[index + 1] !== "-") angle++;
     else if (char === ">" && source[index - 1] !== "-") angle--;
-    else if (char === wanted && round === 0 && curly === 0 && angle === 0) {
+    else if (char === "[") square++;
+    else if (char === "]") square--;
+    else if (char === wanted && round === 0 && curly === 0 && angle === 0 && square === 0) {
       if (wanted === "=" && (source[index + 1] === "=" || source[index - 1] === "=" || source[index - 1] === ">")) continue;
       return index;
     }
@@ -81,6 +85,27 @@ function matching(source: string, start: number, open: string, close: string): n
     else if (source[index] === close && --depth === 0) return index;
   }
   return -1;
+}
+
+function delimiterDepth(source: string): number {
+  const closes: string[] = [];
+  let string = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (string) {
+      if (char === "\\") index++;
+      else if (char === '"') string = false;
+      continue;
+    }
+    if (char === '"') { string = true; continue; }
+    if (char === "#") {
+      while (index < source.length && source[index] !== "\n") index++;
+      continue;
+    }
+    if (char === "(" || char === "{" || char === "[" || char === "<" && source[index + 1] !== "-") closes.push(char === "(" ? ")" : char === "{" ? "}" : char === "[" ? "]" : ">");
+    else if (closes.at(-1) === char) closes.pop();
+  }
+  return closes.length;
 }
 
 export class FlowParser {
@@ -122,9 +147,13 @@ export class FlowParser {
       const expression = this.parseMatch(indent);
       return { kind: "ExpressionStatement", expression, span: expression.span };
     }
-    if (topLevelIndex(line.content, "=") >= 0) return this.parseDeclaration(indent);
-    this.index++;
-    const expression = this.parseExpression(line.content, line.start + line.indent);
+    if (line.content.startsWith("%") && topLevelIndex(line.content, ";") < 0) return this.parseMultilineRewrite(indent);
+    const equals = topLevelIndex(line.content, "=");
+    if (equals >= 0 && line.content.slice(0, equals).trimStart().startsWith("(")) return this.parsePatternDeclaration();
+    if (equals >= 0 || this.hasContinuedDeclarationHeader()) {
+      return this.parseDeclaration(indent);
+    }
+    const expression = this.parseContinuedExpression(line.start + line.indent, line.end);
     return { kind: "ExpressionStatement", expression, span: expression.span };
   }
 
@@ -156,20 +185,83 @@ export class FlowParser {
     return { kind: "RawBendDefinition", source: this.source.slice(start, end).replace(/\n+$/, ""), span: { start, end } };
   }
 
-  private parseDeclaration(indent: number): Declaration {
+  private hasContinuedDeclarationHeader(): boolean {
+    const first = this.lines[this.index];
+    if (delimiterDepth(first.content) === 0 || !/^[+\-~]?[A-Za-z_][A-Za-z0-9_.]*\s*(?:<|\()/.test(first.content)) return false;
+    const start = first.start + first.indent;
+    for (let index = this.index; index < this.lines.length; index++) {
+      const source = this.source.slice(start, this.lines[index].end);
+      if (delimiterDepth(source) > 0) continue;
+      return topLevelIndex(source, "=") >= 0 && topLevelIndex(source, ":") >= 0;
+    }
+    return false;
+  }
+
+  private parseMultilineRewrite(indent: number): ExpressionStatement {
+    const line = this.lines[this.index++];
+    const colon = topLevelIndex(line.content, ":");
+    if (colon < 0) throw new FlowParseError("Expected ':' after the rewrite proof", { start: line.start + line.indent, end: line.end });
+    const proofSource = line.content.slice(1, colon).trim();
+    const motiveSource = line.content.slice(colon + 1).replace(/#.*$/, "").trim();
+    if (!proofSource || !motiveSource) throw new FlowParseError("Expected '%proof : motive'", { start: line.start + line.indent, end: line.end });
+    const proofColumn = line.content.indexOf(proofSource, 1);
+    const motiveColumn = line.content.indexOf(motiveSource, colon + 1);
+    const proof = this.parseExpression(proofSource, line.start + line.indent + proofColumn);
+    const motive = this.parseExpression(motiveSource, line.start + line.indent + motiveColumn);
+    while (this.index < this.lines.length && isTrivia(this.lines[this.index])) this.index++;
+    const bodyLine = this.lines[this.index];
+    if (!bodyLine || bodyLine.indent < indent) throw new FlowParseError("Expected a rewrite body", { start: line.end, end: line.end });
+    const body = this.parseStatement(bodyLine.indent);
+    if (body.kind !== "ExpressionStatement") throw new FlowParseError("A rewrite body must be an expression", body.span);
+    const expression: Expression = {
+      kind: "RewriteExpression",
+      proof,
+      motive,
+      value: body.expression,
+      span: { start: line.start + line.indent, end: body.span.end },
+    };
+    return { kind: "ExpressionStatement", expression, span: expression.span };
+  }
+
+  private parsePatternDeclaration(): PatternDeclaration {
     const line = this.lines[this.index++];
     const equals = topLevelIndex(line.content, "=");
-    const header = line.content.slice(0, equals).trimEnd();
-    const inlineBody = line.content.slice(equals + 1).trim();
-    const parsed = this.parseDeclarationHeader(header, line.start + line.indent);
+    const patternSource = line.content.slice(0, equals).trim();
+    const patternColumn = line.content.indexOf(patternSource);
+    const pattern = expressionToPattern(this.parseExpression(patternSource, line.start + line.indent + patternColumn));
+    const valueSource = line.content.slice(equals + 1).trim();
+    if (!valueSource) throw new FlowParseError("Expected a value after '='", { start: line.end, end: line.end });
+    const valueColumn = line.content.indexOf(valueSource, equals + 1);
+    const value = this.parseContinuedExpression(line.start + line.indent + valueColumn, line.end);
+    return { kind: "PatternDeclaration", pattern, value, span: { start: pattern.span.start, end: value.span.end } };
+  }
+
+  private parseDeclaration(indent: number): Declaration {
+    const first = this.lines[this.index];
+    const start = first.start + first.indent;
+    let end = first.end;
+    let equals = -1;
+    while (this.index < this.lines.length) {
+      const line = this.lines[this.index++];
+      end = line.end;
+      const source = this.source.slice(start, end);
+      equals = topLevelIndex(source, "=");
+      if (equals >= 0) break;
+      if (delimiterDepth(source) === 0) break;
+    }
+    const declarationSource = this.source.slice(start, end);
+    if (equals < 0) throw new FlowParseError("Expected '=' after the declaration header", { start, end });
+    const header = declarationSource.slice(0, equals).trimEnd();
+    const inlineBody = declarationSource.slice(equals + 1).trim();
+    const parsed = this.parseDeclarationHeader(header, start);
     let body: Expression | Block;
     if (inlineBody) {
-      const bodyColumn = line.content.indexOf(inlineBody, equals + 1);
-      body = this.parseExpression(inlineBody, line.start + line.indent + bodyColumn);
+      const bodyOffset = declarationSource.indexOf(inlineBody, equals + 1);
+      body = this.parseContinuedExpression(start + bodyOffset, end);
     } else {
       const childIndent = this.nextContentIndent();
       if (childIndent === null || childIndent <= indent) {
-        throw new FlowParseError(`Expected an indented body for '${parsed.name.name}'`, { start: line.end, end: line.end });
+        throw new FlowParseError(`Expected an indented body for '${parsed.name.name}'`, { start: end, end });
       }
       if (this.lines[this.index].content.trimStart().startsWith("|")) {
         body = this.parseMultilineUnion(childIndent);
@@ -178,7 +270,7 @@ export class FlowParser {
         body = {
           kind: "Block",
           statements,
-          span: { start: statements[0]?.span.start ?? line.end, end: statements.at(-1)?.span.end ?? line.end },
+          span: { start: statements[0]?.span.start ?? end, end: statements.at(-1)?.span.end ?? end },
         };
       }
     }
@@ -186,7 +278,7 @@ export class FlowParser {
       kind: "Declaration",
       ...parsed,
       body,
-      span: { start: line.start + line.indent, end: body.span.end },
+      span: { start, end: body.span.end },
     };
   }
 
@@ -239,10 +331,17 @@ export class FlowParser {
       const line = this.lines[this.index];
       if (isTrivia(line)) { this.index++; continue; }
       if (line.indent !== indent || !line.content.startsWith("|")) break;
-      const expression = this.parseExpression(line.content, line.start + line.indent);
+      const start = line.start + line.indent;
+      this.index++;
+      while (this.index < this.lines.length) {
+        const next = this.lines[this.index];
+        if (!isTrivia(next) && next.indent <= indent) break;
+        this.index++;
+      }
+      const end = this.index < this.lines.length ? this.lines[this.index].start : this.source.length;
+      const expression = this.parseExpression(this.source.slice(start, end).replace(/\s+$/, ""), start);
       if (expression.kind !== "UnionExpression") throw new FlowParseError("Expected a union variant", expression.span);
       variants.push(...expression.variants);
-      this.index++;
     }
     if (!variants.length) throw new FlowParseError("Expected at least one union variant", { start: this.lines[this.index]?.start ?? this.source.length, end: this.lines[this.index]?.end ?? this.source.length });
     return { kind: "UnionExpression", variants, span: { start: variants[0].span.start, end: variants.at(-1)!.span.end } };
@@ -305,6 +404,19 @@ export class FlowParser {
     }
     if (!cases.length) throw new FlowParseError("A match requires at least one case", { start: line.end, end: line.end });
     return { kind: "MatchExpression", scrutinee, cases, span: { start: line.start + line.indent, end: cases.at(-1)!.span.end } };
+  }
+
+  private parseContinuedExpression(start: number, initialEnd: number): Expression {
+    let end = initialEnd;
+    // The caller has not consumed its first line yet for ordinary expression
+    // statements, but has for inline declaration bodies.
+    const first = this.lines.findIndex((line) => line.start <= start && start <= line.end);
+    if (this.index <= first) this.index = first + 1;
+    while (delimiterDepth(this.source.slice(start, end)) > 0 && this.index < this.lines.length) {
+      end = this.lines[this.index].end;
+      this.index++;
+    }
+    return this.parseExpression(this.source.slice(start, end), start);
   }
 
   private parseExpression(source: string, base: number): Expression {

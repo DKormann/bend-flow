@@ -45,6 +45,13 @@ test("previews an explicitly named top-level value", async () => {
   assert.equal(result.valuePreviews[0].value, "42");
 });
 
+test("previews pure calls in a marker", async () => {
+  const result = await check(`import Base\n\ndef add(x: Nat, y: Nat) -> Nat:\n  (x + y : Nat)\n\n#? add(3n, 4n)\n`);
+  assert.deepEqual(result.diagnostics, []);
+  assert.equal(result.valuePreviews.length, 1);
+  assert.equal(result.valuePreviews[0].value, "7n");
+});
+
 test("does not preview functions", async () => {
   const result = await check(`import Base\n\ndef identity(x: U32) -> U32:\n  x\n  #?\n`);
   assert.deepEqual(result.diagnostics, []);
